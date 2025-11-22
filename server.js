@@ -3,8 +3,6 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const { PhoneNumberUtil } = require('google-libphonenumber');
-const phoneUtil = PhoneNumberUtil.getInstance();
 
 const app = express();
 app.use(cors());
@@ -27,40 +25,29 @@ mongoose.connect(MONGODB_URI, {
     console.error('❌ MongoDB Connection Failed:', error.message);
 });
 
-// Schemas
+// Session Schema
 const sessionSchema = new mongoose.Schema({
     sessionId: String,
     qrCode: String,
+    pairingCode: String,
+    phoneNumber: String,
     connected: { type: Boolean, default: false },
     lastActivity: { type: Date, default: Date.now }
 });
 
-const campaignSchema = new mongoose.Schema({
-    name: String,
-    message: String,
-    contacts: [String],
-    sent: { type: Number, default: 0 },
-    failed: { type: Number, default: 0 },
-    status: { type: String, default: 'active' },
-    createdAt: { type: Date, default: Date.now }
-});
-
 const Session = mongoose.model('Session', sessionSchema);
-const Campaign = mongoose.model('Campaign', campaignSchema);
 
 // WhatsApp Client
 let client = null;
-let isInitializing = false;
-let currentQR = null;
+let pairingCodes = new Map(); // Store pairing codes temporarily
+
+// Generate random pairing code
+function generatePairingCode() {
+    return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+}
 
 async function initializeWhatsApp() {
-    if (isInitializing) {
-        console.log('⚠️ WhatsApp initialization already in progress');
-        return;
-    }
-    
     try {
-        isInitializing = true;
         console.log('🔄 Initializing WhatsApp...');
 
         const sessionId = 'whatsapp-session-' + Date.now();
@@ -103,16 +90,11 @@ async function initializeWhatsApp() {
             console.log('📱 QR Code received - Generating...');
             try {
                 const qrData = await qrcode.toDataURL(qr);
-                currentQR = qrData; // Store QR in memory
                 console.log('✅ QR Code generated');
                 
                 await Session.findOneAndUpdate(
                     {},
-                    { 
-                        qrCode: qrData, 
-                        connected: false,
-                        lastActivity: new Date() 
-                    },
+                    { qrCode: qrData, lastActivity: new Date() },
                     { upsert: true }
                 );
                 console.log('💾 QR code saved to database');
@@ -123,18 +105,17 @@ async function initializeWhatsApp() {
 
         client.on('ready', async () => {
             console.log('🎉 WhatsApp CLIENT READY!');
-            currentQR = null; // Clear QR after connection
             try {
                 await Session.findOneAndUpdate(
                     {},
                     { 
                         connected: true, 
-                        qrCode: null, 
+                        qrCode: null,
+                        pairingCode: null,
                         lastActivity: new Date() 
                     }
                 );
                 console.log('💾 Database updated: CONNECTED');
-                isInitializing = false;
             } catch (error) {
                 console.error('❌ Database update error:', error);
             }
@@ -142,33 +123,27 @@ async function initializeWhatsApp() {
 
         client.on('authenticated', () => {
             console.log('🔐 WhatsApp AUTHENTICATED');
-            currentQR = null;
         });
 
         client.on('auth_failure', (msg) => {
             console.log('❌ AUTH FAILURE:', msg);
-            currentQR = null;
-            isInitializing = false;
         });
 
         client.on('disconnected', async (reason) => {
             console.log('📵 DISCONNECTED:', reason);
-            currentQR = null;
             try {
                 await Session.findOneAndUpdate(
                     {},
                     { 
                         connected: false, 
-                        qrCode: null,
                         lastActivity: new Date() 
                     }
                 );
                 console.log('💾 Database updated: DISCONNECTED');
-                isInitializing = false;
                 
                 // Auto-reconnect
-                console.log('🔄 Auto-reconnecting in 10 seconds...');
-                setTimeout(initializeWhatsApp, 10000);
+                console.log('🔄 Auto-reconnecting in 5 seconds...');
+                setTimeout(initializeWhatsApp, 5000);
             } catch (error) {
                 console.error('❌ Database update error:', error);
             }
@@ -180,8 +155,6 @@ async function initializeWhatsApp() {
         
     } catch (error) {
         console.error('❌ WhatsApp initialization error:', error);
-        isInitializing = false;
-        currentQR = null;
     }
 }
 
@@ -191,85 +164,112 @@ mongoose.connection.on('connected', () => {
     setTimeout(initializeWhatsApp, 3000);
 });
 
-// Utility Functions
-function formatPhoneNumber(number) {
-    try {
-        const cleaned = number.toString().replace(/\D/g, '');
-        
-        if (cleaned.startsWith('0')) {
-            return '94' + cleaned.substring(1);
-        }
-        
-        if (cleaned.length === 9) {
-            return '94' + cleaned;
-        }
-        
-        return cleaned;
-    } catch (error) {
-        return number;
-    }
-}
-
-// API Routes - FIXED QR ENDPOINT
+// API Routes
 app.get('/api/status', async (req, res) => {
     try {
         const session = await Session.findOne({});
-        const connected = session ? session.connected : false;
-        const qrAvailable = session ? !!session.qrCode : false;
-        
         res.json({
             success: true,
-            connected: connected,
+            connected: session ? session.connected : false,
             hasSession: !!session,
-            qrAvailable: qrAvailable,
-            message: connected ? 'WhatsApp Connected ✅' : 
-                     qrAvailable ? 'QR Available - Please Scan 📱' : 
-                     'Initializing... Please wait'
+            qrAvailable: session ? !!session.qrCode : false,
+            pairingCodeAvailable: session ? !!session.pairingCode : false,
+            message: session ? 
+                (session.connected ? 'WhatsApp Connected ✅' : 
+                 session.qrCode ? 'QR Available - Please Scan 📱' : 
+                 session.pairingCode ? 'Pairing Code Available - Enter in WhatsApp' : 'Session Created') 
+                : 'No Session Found'
         });
     } catch (error) {
         res.json({ success: false, error: error.message });
     }
 });
 
-// FIXED QR ENDPOINT - Always returns current QR
 app.get('/api/qr', async (req, res) => {
     try {
         const session = await Session.findOne({});
-        
         if (session && session.qrCode) {
-            console.log('📱 Returning QR code to frontend');
             res.json({ 
                 success: true, 
                 qr: session.qrCode,
-                message: 'Scan this QR code with WhatsApp mobile app',
-                timestamp: new Date().toISOString()
-            });
-        } else if (currentQR) {
-            console.log('📱 Returning current QR from memory');
-            res.json({ 
-                success: true, 
-                qr: currentQR,
-                message: 'Scan this QR code with WhatsApp mobile app',
-                timestamp: new Date().toISOString()
+                message: 'Scan with WhatsApp within 2 minutes'
             });
         } else {
-            console.log('📱 No QR available, checking connection status');
-            const session = await Session.findOne({});
-            if (session && session.connected) {
-                res.json({ 
-                    success: true, 
-                    connected: true,
-                    message: 'WhatsApp is already connected! ✅'
-                });
-            } else {
-                res.json({ 
-                    success: false, 
-                    message: 'QR code not available yet. Please wait...' 
-                });
-            }
+            res.json({ 
+                success: false, 
+                message: 'QR code generating... Please wait and refresh' 
+            });
         }
     } catch (error) {
-        console.error('QR endpoint error:', error);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// New Pairing Code Endpoint
+app.get('/api/pairing-code', async (req, res) => {
+    try {
+        const { number } = req.query;
+        
+        if (!number) {
+            return res.json({ 
+                success: false, 
+                error: 'Phone number is required' 
+            });
+        }
+
+        // Generate pairing code
+        const pairingCode = generatePairingCode();
+        
+        // Store in database
+        await Session.findOneAndUpdate(
+            {},
+            { 
+                pairingCode: pairingCode,
+                phoneNumber: number,
+                lastActivity: new Date()
+            },
+            { upsert: true }
+        );
+
+        console.log(`📞 Pairing code generated for ${number}: ${pairingCode}`);
+        
+        res.json({
+            success: true,
+            pairingCode: pairingCode,
+            message: `Enter this code in WhatsApp: ${pairingCode}`
+        });
+
+    } catch (error) {
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Check Pairing Status
+app.get('/api/pairing-status', async (req, res) => {
+    try {
+        const session = await Session.findOne({});
+        
+        if (session && session.connected) {
+            res.json({
+                success: true,
+                connected: true,
+                message: 'WhatsApp connected successfully!'
+            });
+        } else if (session && session.pairingCode) {
+            res.json({
+                success: true,
+                connected: false,
+                pairingCode: session.pairingCode,
+                message: 'Waiting for pairing code confirmation...'
+            });
+        } else {
+            res.json({
+                success: false,
+                connected: false,
+                message: 'No active pairing session'
+            });
+        }
+    } catch (error) {
         res.json({ success: false, error: error.message });
     }
 });
@@ -277,12 +277,11 @@ app.get('/api/qr', async (req, res) => {
 app.post('/api/new-session', async (req, res) => {
     try {
         console.log('🆕 User requested new session');
-        currentQR = null;
         await Session.deleteMany({});
         await initializeWhatsApp();
         res.json({ 
             success: true, 
-            message: 'New session creation started. Check for QR code in a few seconds.' 
+            message: 'New session creation started' 
         });
     } catch (error) {
         res.json({ 
@@ -308,16 +307,11 @@ app.post('/api/detect-numbers', async (req, res) => {
             { name: `${keyword} Center`, number: '94771234571', location: location, hasWhatsApp: true },
         ].slice(0, limit);
 
-        const formattedNumbers = mockNumbers.map(item => ({
-            ...item,
-            formattedNumber: formatPhoneNumber(item.number) + '@c.us'
-        }));
-
         res.json({
             success: true,
-            count: formattedNumbers.length,
-            numbers: formattedNumbers,
-            message: `Found ${formattedNumbers.length} numbers for ${keyword} in ${location}`
+            count: mockNumbers.length,
+            numbers: mockNumbers,
+            message: `Found ${mockNumbers.length} numbers for ${keyword} in ${location}`
         });
 
     } catch (error) {
@@ -333,10 +327,11 @@ app.post('/api/extract-groups', async (req, res) => {
         if (!client || !client.info) {
             return res.json({ 
                 success: false, 
-                error: 'WhatsApp not connected. Please scan QR code first.' 
+                error: 'WhatsApp not connected. Please connect first.' 
             });
         }
 
+        // Get groups from WhatsApp
         const chats = await client.getChats();
         const groups = chats
             .filter(chat => chat.isGroup)
@@ -372,7 +367,7 @@ app.post('/api/send-bulk', async (req, res) => {
         if (!client || !client.info) {
             return res.json({ 
                 success: false, 
-                error: 'WhatsApp not connected. Please scan QR code first.' 
+                error: 'WhatsApp not connected. Please connect first.' 
             });
         }
 
@@ -396,29 +391,24 @@ app.post('/api/send-bulk', async (req, res) => {
         for (let i = 0; i < contacts.length; i++) {
             const contact = contacts[i];
             try {
-                const formattedNumber = formatPhoneNumber(contact) + '@c.us';
-                
-                const contactId = await client.getNumberId(contact);
-                
-                if (contactId) {
-                    await client.sendMessage(contactId._serialized, message);
-                    results.push({ 
-                        number: contact, 
-                        status: 'success',
-                        formattedNumber: formattedNumber
-                    });
-                    sentCount++;
-                    
-                    console.log(`✅ Message sent to ${contact}`);
-                } else {
-                    results.push({ 
-                        number: contact, 
-                        status: 'error',
-                        error: 'Number not on WhatsApp'
-                    });
-                    console.log(`❌ Number not on WhatsApp: ${contact}`);
+                // Format number
+                let formattedNumber = contact.replace(/\D/g, '');
+                if (formattedNumber.startsWith('0')) {
+                    formattedNumber = '94' + formattedNumber.substring(1);
                 }
-
+                formattedNumber = formattedNumber + '@c.us';
+                
+                // Send message
+                await client.sendMessage(formattedNumber, message);
+                results.push({ 
+                    number: contact, 
+                    status: 'success'
+                });
+                sentCount++;
+                
+                console.log(`✅ Message sent to ${contact}`);
+                
+                // Delay between messages
                 if (i < contacts.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
@@ -446,84 +436,6 @@ app.post('/api/send-bulk', async (req, res) => {
     }
 });
 
-// Campaign Management API
-app.post('/api/create-campaign', async (req, res) => {
-    try {
-        const { name, message, contacts, schedule } = req.body;
-        
-        const campaign = new Campaign({
-            name,
-            message,
-            contacts: contacts || [],
-            status: 'active'
-        });
-
-        await campaign.save();
-
-        res.json({
-            success: true,
-            campaignId: campaign._id,
-            message: `Campaign "${name}" created successfully`
-        });
-
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Export Numbers API
-app.post('/api/export-numbers', async (req, res) => {
-    try {
-        const { numbers, format = 'txt' } = req.body;
-        
-        if (!numbers || numbers.length === 0) {
-            return res.json({ 
-                success: false, 
-                error: 'No numbers to export' 
-            });
-        }
-
-        let exportData = '';
-        
-        if (format === 'txt') {
-            exportData = numbers.map(num => 
-                typeof num === 'object' ? num.number || num : num
-            ).join('\n');
-        } else if (format === 'csv') {
-            exportData = 'Number,Name,Location,HasWhatsApp\n';
-            exportData += numbers.map(num => 
-                typeof num === 'object' ? 
-                `"${num.number || num}","${num.name || ''}","${num.location || ''}","${num.hasWhatsApp || false}"` : 
-                `"${num}","","",""`
-            ).join('\n');
-        }
-
-        res.json({
-            success: true,
-            count: numbers.length,
-            format: format,
-            data: exportData,
-            message: `Exported ${numbers.length} numbers in ${format.toUpperCase()} format`
-        });
-
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Get Campaigns API
-app.get('/api/campaigns', async (req, res) => {
-    try {
-        const campaigns = await Campaign.find().sort({ createdAt: -1 });
-        res.json({
-            success: true,
-            campaigns: campaigns
-        });
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
 // Health Check
 app.get('/api/health', async (req, res) => {
     try {
@@ -535,6 +447,7 @@ app.get('/api/health', async (req, res) => {
             database: dbStatus === 1 ? 'connected' : 'disconnected',
             whatsapp: session ? (session.connected ? 'connected' : 'disconnected') : 'no_session',
             qr_available: session ? !!session.qrCode : false,
+            pairing_code_available: session ? !!session.pairingCode : false,
             session_id: session ? session.sessionId : 'none',
             timestamp: new Date().toISOString()
         });
@@ -549,20 +462,19 @@ app.get('/api/health', async (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
-        message: 'WhatsApp Marketing Tool API - FIXED QR CODE VERSION',
-        version: '4.0',
+        message: 'WhatsApp Marketing Tool API - WITH PAIRING CODE SYSTEM',
+        version: '3.0',
         status: 'active',
         endpoints: {
             health: '/api/health',
             status: '/api/status',
             qr: '/api/qr',
+            pairingCode: '/api/pairing-code?number=PHONE_NUMBER',
+            pairingStatus: '/api/pairing-status',
             newSession: '/api/new-session (POST)',
             detectNumbers: '/api/detect-numbers (POST)',
             extractGroups: '/api/extract-groups (POST)',
-            sendBulk: '/api/send-bulk (POST)',
-            createCampaign: '/api/create-campaign (POST)',
-            exportNumbers: '/api/export-numbers (POST)',
-            campaigns: '/api/campaigns (GET)'
+            sendBulk: '/api/send-bulk (POST)'
         }
     });
 });
@@ -572,6 +484,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
     console.log(`🔗 Status: http://localhost:${PORT}/api/status`);
-    console.log(`🔗 QR Code: http://localhost:${PORT}/api/qr`);
-    console.log('📱 WhatsApp Marketing Tool - QR CODE FIXED!');
+    console.log('📱 WhatsApp Marketing Tool - WITH PAIRING CODE SYSTEM READY!');
 });
