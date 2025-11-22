@@ -25,7 +25,7 @@ mongoose.connect(MONGODB_URI, {
     console.error('❌ MongoDB Connection Failed:', error.message);
 });
 
-// Session Schema
+// Schemas
 const sessionSchema = new mongoose.Schema({
     sessionId: String,
     qrCode: String,
@@ -39,11 +39,55 @@ const Session = mongoose.model('Session', sessionSchema);
 
 // WhatsApp Client
 let client = null;
-let pairingCodes = new Map(); // Store pairing codes temporarily
 
-// Generate random pairing code
+// Generate 8-character pairing code with mixed characters
 function generatePairingCode() {
-    return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*';
+    let result = '';
+    const charactersLength = characters.length;
+    
+    for (let i = 0; i < 8; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    
+    return result;
+}
+
+// Alternative: Generate alphanumeric code (only letters and numbers)
+function generateAlphanumericCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    
+    for (let i = 0; i < 8; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    return result;
+}
+
+// Alternative: Generate memorable code (3 letters + 3 numbers + 2 letters)
+function generateMemorableCode() {
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const numbers = '0123456789';
+    
+    let code = '';
+    
+    // First 3 letters
+    for (let i = 0; i < 3; i++) {
+        code += letters.charAt(Math.floor(Math.random() * letters.length));
+    }
+    
+    // 3 numbers
+    for (let i = 0; i < 3; i++) {
+        code += numbers.charAt(Math.floor(Math.random() * numbers.length));
+    }
+    
+    // Last 2 letters
+    for (let i = 0; i < 2; i++) {
+        code += letters.charAt(Math.floor(Math.random() * letters.length));
+    }
+    
+    return code;
 }
 
 async function initializeWhatsApp() {
@@ -164,7 +208,9 @@ mongoose.connection.on('connected', () => {
     setTimeout(initializeWhatsApp, 3000);
 });
 
-// API Routes
+// ==================== API ROUTES ====================
+
+// Status Check
 app.get('/api/status', async (req, res) => {
     try {
         const session = await Session.findOne({});
@@ -185,6 +231,7 @@ app.get('/api/status', async (req, res) => {
     }
 });
 
+// QR Code
 app.get('/api/qr', async (req, res) => {
     try {
         const session = await Session.findOne({});
@@ -205,10 +252,10 @@ app.get('/api/qr', async (req, res) => {
     }
 });
 
-// New Pairing Code Endpoint
+// Pairing Code - Updated with 8 characters
 app.get('/api/pairing-code', async (req, res) => {
     try {
-        const { number } = req.query;
+        const { number, type = 'mixed' } = req.query;
         
         if (!number) {
             return res.json({ 
@@ -217,10 +264,22 @@ app.get('/api/pairing-code', async (req, res) => {
             });
         }
 
-        // Generate pairing code
-        const pairingCode = generatePairingCode();
+        let pairingCode;
         
-        // Store in database
+        // Choose code type based on parameter
+        switch(type) {
+            case 'alphanumeric':
+                pairingCode = generateAlphanumericCode();
+                break;
+            case 'memorable':
+                pairingCode = generateMemorableCode();
+                break;
+            case 'mixed':
+            default:
+                pairingCode = generatePairingCode();
+                break;
+        }
+        
         await Session.findOneAndUpdate(
             {},
             { 
@@ -231,12 +290,14 @@ app.get('/api/pairing-code', async (req, res) => {
             { upsert: true }
         );
 
-        console.log(`📞 Pairing code generated for ${number}: ${pairingCode}`);
+        console.log(`📞 8-character pairing code generated for ${number}: ${pairingCode}`);
         
         res.json({
             success: true,
             pairingCode: pairingCode,
-            message: `Enter this code in WhatsApp: ${pairingCode}`
+            codeType: type,
+            message: `Enter this 8-character code in WhatsApp: ${pairingCode}`,
+            instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number'
         });
 
     } catch (error) {
@@ -244,7 +305,7 @@ app.get('/api/pairing-code', async (req, res) => {
     }
 });
 
-// Check Pairing Status
+// Pairing Status
 app.get('/api/pairing-status', async (req, res) => {
     try {
         const session = await Session.findOne({});
@@ -274,6 +335,7 @@ app.get('/api/pairing-status', async (req, res) => {
     }
 });
 
+// New Session
 app.post('/api/new-session', async (req, res) => {
     try {
         console.log('🆕 User requested new session');
@@ -288,151 +350,6 @@ app.post('/api/new-session', async (req, res) => {
             success: false, 
             error: error.message 
         });
-    }
-});
-
-// Number Detection API
-app.post('/api/detect-numbers', async (req, res) => {
-    try {
-        const { keyword, location, limit = 10 } = req.body;
-        
-        console.log(`🔍 Searching for: ${keyword} in ${location}, limit: ${limit}`);
-        
-        // Simulate number detection
-        const mockNumbers = [
-            { name: `${keyword} Business 1`, number: '94771234567', location: location, hasWhatsApp: true },
-            { name: `${keyword} Business 2`, number: '94771234568', location: location, hasWhatsApp: true },
-            { name: `${keyword} Service`, number: '94771234569', location: location, hasWhatsApp: true },
-            { name: `${keyword} Shop`, number: '94771234570', location: location, hasWhatsApp: true },
-            { name: `${keyword} Center`, number: '94771234571', location: location, hasWhatsApp: true },
-        ].slice(0, limit);
-
-        res.json({
-            success: true,
-            count: mockNumbers.length,
-            numbers: mockNumbers,
-            message: `Found ${mockNumbers.length} numbers for ${keyword} in ${location}`
-        });
-
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Group Extraction API
-app.post('/api/extract-groups', async (req, res) => {
-    try {
-        const { keywords, limit = 10 } = req.body;
-        
-        if (!client || !client.info) {
-            return res.json({ 
-                success: false, 
-                error: 'WhatsApp not connected. Please connect first.' 
-            });
-        }
-
-        // Get groups from WhatsApp
-        const chats = await client.getChats();
-        const groups = chats
-            .filter(chat => chat.isGroup)
-            .filter(chat => {
-                if (!keywords) return true;
-                return chat.name.toLowerCase().includes(keywords.toLowerCase());
-            })
-            .slice(0, limit)
-            .map(group => ({
-                id: group.id._serialized,
-                name: group.name,
-                members: group.participants.length,
-                active: true
-            }));
-
-        res.json({
-            success: true,
-            count: groups.length,
-            groups: groups,
-            message: `Found ${groups.length} groups`
-        });
-
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Bulk Messaging API
-app.post('/api/send-bulk', async (req, res) => {
-    try {
-        const { contacts, message, delay = 5000 } = req.body;
-        
-        if (!client || !client.info) {
-            return res.json({ 
-                success: false, 
-                error: 'WhatsApp not connected. Please connect first.' 
-            });
-        }
-
-        if (!contacts || contacts.length === 0) {
-            return res.json({ 
-                success: false, 
-                error: 'No contacts provided' 
-            });
-        }
-
-        if (!message) {
-            return res.json({ 
-                success: false, 
-                error: 'No message provided' 
-            });
-        }
-
-        const results = [];
-        let sentCount = 0;
-
-        for (let i = 0; i < contacts.length; i++) {
-            const contact = contacts[i];
-            try {
-                // Format number
-                let formattedNumber = contact.replace(/\D/g, '');
-                if (formattedNumber.startsWith('0')) {
-                    formattedNumber = '94' + formattedNumber.substring(1);
-                }
-                formattedNumber = formattedNumber + '@c.us';
-                
-                // Send message
-                await client.sendMessage(formattedNumber, message);
-                results.push({ 
-                    number: contact, 
-                    status: 'success'
-                });
-                sentCount++;
-                
-                console.log(`✅ Message sent to ${contact}`);
-                
-                // Delay between messages
-                if (i < contacts.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
-
-            } catch (error) {
-                results.push({ 
-                    number: contact, 
-                    status: 'error',
-                    error: error.message
-                });
-                console.log(`❌ Failed to send to ${contact}:`, error.message);
-            }
-        }
-
-        res.json({
-            success: true,
-            sent: sentCount,
-            failed: contacts.length - sentCount,
-            results: results,
-            message: `Sent ${sentCount}/${contacts.length} messages successfully`
-        });
-
-    } catch (error) {
-        res.json({ success: false, error: error.message });
     }
 });
 
@@ -462,19 +379,21 @@ app.get('/api/health', async (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
-        message: 'WhatsApp Marketing Tool API - WITH PAIRING CODE SYSTEM',
-        version: '3.0',
+        message: 'WhatsApp Marketing Tool API - 8-CHARACTER PAIRING CODES',
+        version: '4.1',
         status: 'active',
+        pairing_code: {
+            length: '8 characters',
+            types: ['mixed', 'alphanumeric', 'memorable'],
+            example: 'A1b2C3d4'
+        },
         endpoints: {
             health: '/api/health',
             status: '/api/status',
             qr: '/api/qr',
-            pairingCode: '/api/pairing-code?number=PHONE_NUMBER',
+            pairingCode: '/api/pairing-code?number=PHONE_NUMBER&type=mixed',
             pairingStatus: '/api/pairing-status',
-            newSession: '/api/new-session (POST)',
-            detectNumbers: '/api/detect-numbers (POST)',
-            extractGroups: '/api/extract-groups (POST)',
-            sendBulk: '/api/send-bulk (POST)'
+            newSession: '/api/new-session (POST)'
         }
     });
 });
@@ -484,5 +403,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
     console.log(`🔗 Status: http://localhost:${PORT}/api/status`);
-    console.log('📱 WhatsApp Marketing Tool - WITH PAIRING CODE SYSTEM READY!');
+    console.log('📱 WhatsApp Marketing Tool - 8-CHARACTER PAIRING CODES READY!');
 });
