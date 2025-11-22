@@ -51,6 +51,7 @@ const Campaign = mongoose.model('Campaign', campaignSchema);
 // WhatsApp Client
 let client = null;
 let isInitializing = false;
+let currentQR = null;
 
 async function initializeWhatsApp() {
     if (isInitializing) {
@@ -102,11 +103,16 @@ async function initializeWhatsApp() {
             console.log('📱 QR Code received - Generating...');
             try {
                 const qrData = await qrcode.toDataURL(qr);
+                currentQR = qrData; // Store QR in memory
                 console.log('✅ QR Code generated');
                 
                 await Session.findOneAndUpdate(
                     {},
-                    { qrCode: qrData, lastActivity: new Date() },
+                    { 
+                        qrCode: qrData, 
+                        connected: false,
+                        lastActivity: new Date() 
+                    },
                     { upsert: true }
                 );
                 console.log('💾 QR code saved to database');
@@ -117,6 +123,7 @@ async function initializeWhatsApp() {
 
         client.on('ready', async () => {
             console.log('🎉 WhatsApp CLIENT READY!');
+            currentQR = null; // Clear QR after connection
             try {
                 await Session.findOneAndUpdate(
                     {},
@@ -135,20 +142,24 @@ async function initializeWhatsApp() {
 
         client.on('authenticated', () => {
             console.log('🔐 WhatsApp AUTHENTICATED');
+            currentQR = null;
         });
 
         client.on('auth_failure', (msg) => {
             console.log('❌ AUTH FAILURE:', msg);
+            currentQR = null;
             isInitializing = false;
         });
 
         client.on('disconnected', async (reason) => {
             console.log('📵 DISCONNECTED:', reason);
+            currentQR = null;
             try {
                 await Session.findOneAndUpdate(
                     {},
                     { 
                         connected: false, 
+                        qrCode: null,
                         lastActivity: new Date() 
                     }
                 );
@@ -170,6 +181,7 @@ async function initializeWhatsApp() {
     } catch (error) {
         console.error('❌ WhatsApp initialization error:', error);
         isInitializing = false;
+        currentQR = null;
     }
 }
 
@@ -182,15 +194,12 @@ mongoose.connection.on('connected', () => {
 // Utility Functions
 function formatPhoneNumber(number) {
     try {
-        // Remove any non-digit characters
         const cleaned = number.toString().replace(/\D/g, '');
         
-        // If number starts with 0, replace with country code
         if (cleaned.startsWith('0')) {
             return '94' + cleaned.substring(1);
         }
         
-        // If number doesn't have country code, add it
         if (cleaned.length === 9) {
             return '94' + cleaned;
         }
@@ -201,51 +210,66 @@ function formatPhoneNumber(number) {
     }
 }
 
-function validatePhoneNumber(number) {
-    try {
-        const formatted = formatPhoneNumber(number);
-        const phoneNumber = phoneUtil.parse(formatted, 'LK');
-        return phoneUtil.isValidNumber(phoneNumber);
-    } catch (error) {
-        return false;
-    }
-}
-
-// API Routes
+// API Routes - FIXED QR ENDPOINT
 app.get('/api/status', async (req, res) => {
     try {
         const session = await Session.findOne({});
+        const connected = session ? session.connected : false;
+        const qrAvailable = session ? !!session.qrCode : false;
+        
         res.json({
             success: true,
-            connected: session ? session.connected : false,
+            connected: connected,
             hasSession: !!session,
-            qrAvailable: session ? !!session.qrCode : false,
-            message: session ? 
-                (session.connected ? 'WhatsApp Connected ✅' : 
-                 session.qrCode ? 'QR Available - Please Scan 📱' : 'Session Created') 
-                : 'No Session Found'
+            qrAvailable: qrAvailable,
+            message: connected ? 'WhatsApp Connected ✅' : 
+                     qrAvailable ? 'QR Available - Please Scan 📱' : 
+                     'Initializing... Please wait'
         });
     } catch (error) {
         res.json({ success: false, error: error.message });
     }
 });
 
+// FIXED QR ENDPOINT - Always returns current QR
 app.get('/api/qr', async (req, res) => {
     try {
         const session = await Session.findOne({});
+        
         if (session && session.qrCode) {
+            console.log('📱 Returning QR code to frontend');
             res.json({ 
                 success: true, 
                 qr: session.qrCode,
-                message: 'Scan with WhatsApp within 2 minutes'
+                message: 'Scan this QR code with WhatsApp mobile app',
+                timestamp: new Date().toISOString()
+            });
+        } else if (currentQR) {
+            console.log('📱 Returning current QR from memory');
+            res.json({ 
+                success: true, 
+                qr: currentQR,
+                message: 'Scan this QR code with WhatsApp mobile app',
+                timestamp: new Date().toISOString()
             });
         } else {
-            res.json({ 
-                success: false, 
-                message: session?.connected ? 'Already Connected' : 'QR code generating... Please wait and refresh' 
-            });
+            console.log('📱 No QR available, checking connection status');
+            const session = await Session.findOne({});
+            if (session && session.connected) {
+                res.json({ 
+                    success: true, 
+                    connected: true,
+                    message: 'WhatsApp is already connected! ✅'
+                });
+            } else {
+                res.json({ 
+                    success: false, 
+                    message: 'QR code not available yet. Please wait...' 
+                });
+            }
         }
     } catch (error) {
+        console.error('QR endpoint error:', error);
         res.json({ success: false, error: error.message });
     }
 });
@@ -253,10 +277,12 @@ app.get('/api/qr', async (req, res) => {
 app.post('/api/new-session', async (req, res) => {
     try {
         console.log('🆕 User requested new session');
+        currentQR = null;
+        await Session.deleteMany({});
         await initializeWhatsApp();
         res.json({ 
             success: true, 
-            message: 'New session creation started' 
+            message: 'New session creation started. Check for QR code in a few seconds.' 
         });
     } catch (error) {
         res.json({ 
@@ -273,7 +299,7 @@ app.post('/api/detect-numbers', async (req, res) => {
         
         console.log(`🔍 Searching for: ${keyword} in ${location}, limit: ${limit}`);
         
-        // Simulate number detection (in real app, integrate with Google Places, Facebook, etc.)
+        // Simulate number detection
         const mockNumbers = [
             { name: `${keyword} Business 1`, number: '94771234567', location: location, hasWhatsApp: true },
             { name: `${keyword} Business 2`, number: '94771234568', location: location, hasWhatsApp: true },
@@ -282,7 +308,6 @@ app.post('/api/detect-numbers', async (req, res) => {
             { name: `${keyword} Center`, number: '94771234571', location: location, hasWhatsApp: true },
         ].slice(0, limit);
 
-        // Format numbers
         const formattedNumbers = mockNumbers.map(item => ({
             ...item,
             formattedNumber: formatPhoneNumber(item.number) + '@c.us'
@@ -312,7 +337,6 @@ app.post('/api/extract-groups', async (req, res) => {
             });
         }
 
-        // Get groups from WhatsApp
         const chats = await client.getChats();
         const groups = chats
             .filter(chat => chat.isGroup)
@@ -374,7 +398,6 @@ app.post('/api/send-bulk', async (req, res) => {
             try {
                 const formattedNumber = formatPhoneNumber(contact) + '@c.us';
                 
-                // Check if contact exists
                 const contactId = await client.getNumberId(contact);
                 
                 if (contactId) {
@@ -396,7 +419,6 @@ app.post('/api/send-bulk', async (req, res) => {
                     console.log(`❌ Number not on WhatsApp: ${contact}`);
                 }
 
-                // Delay between messages
                 if (i < contacts.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
@@ -527,8 +549,8 @@ app.get('/api/health', async (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
-        message: 'WhatsApp Marketing Tool API - COMPLETE WORKING VERSION',
-        version: '3.0',
+        message: 'WhatsApp Marketing Tool API - FIXED QR CODE VERSION',
+        version: '4.0',
         status: 'active',
         endpoints: {
             health: '/api/health',
@@ -550,5 +572,6 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
     console.log(`🔗 Status: http://localhost:${PORT}/api/status`);
-    console.log('📱 WhatsApp Marketing Tool - ALL FEATURES READY!');
+    console.log(`🔗 QR Code: http://localhost:${PORT}/api/qr`);
+    console.log('📱 WhatsApp Marketing Tool - QR CODE FIXED!');
 });
