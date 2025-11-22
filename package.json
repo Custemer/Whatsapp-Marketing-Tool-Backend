@@ -1,5 +1,5 @@
 {
-    "name": "whatsapp-simple-backend",
+    "name": "whatsapp-marketing-fixed",
     "version": "1.0.0",
     "main": "server.js",
     "scripts": {
@@ -10,5 +10,8 @@
         "whatsapp-web.js": "^1.23.0",
         "qrcode": "^1.5.3",
         "cors": "^2.8.5"
+    },
+    "engines": {
+        "node": ">=16.0.0"
     }
 }
