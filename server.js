@@ -6,6 +6,15 @@ const fs = require('fs-extra');
 const path = require('path');
 const pino = require('pino');
 
+// Import Baileys components
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    makeInMemoryStore,
+    Browsers,
+    DisconnectReason
+} = require('@whiskeysockets/baileys');
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -86,6 +95,11 @@ function formatPhoneNumber(number) {
     }
 }
 
+// Delay function for bulk messaging
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Initialize WhatsApp with Baileys
 async function initializeWhatsApp(manualData = null) {
     if (isInitializing) {
@@ -101,6 +115,8 @@ async function initializeWhatsApp(manualData = null) {
         const sessionPath = path.join(SESSION_BASE_PATH, sessionId);
 
         let state;
+        let saveCredsFunction = null;
+
         if (manualData) {
             // Use manual session data
             console.log('🔧 Using manual session data');
@@ -132,7 +148,8 @@ async function initializeWhatsApp(manualData = null) {
             // Use multi-file auth state
             console.log('🔧 Using multi-file auth state');
             const authState = await useMultiFileAuthState(sessionPath);
-            state = authState;
+            state = authState.state;
+            saveCredsFunction = authState.saveCreds;
         }
 
         // Create socket with proper configuration
@@ -141,17 +158,17 @@ async function initializeWhatsApp(manualData = null) {
                 creds: state.creds,
                 keys: state.keys,
             },
-            printQRInTerminal: false,
+            printQRInTerminal: true, // Changed to true for debugging
             logger: pino({ level: 'error' }),
             browser: Browsers.ubuntu('Chrome'),
-            markOnlineOnConnect: true,
+            markOnlineOnConnect: false, // Changed for better stability
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
         });
 
         // Store credentials updates
-        if (!manualData) {
-            sock.ev.on('creds.update', state.saveCreds);
+        if (saveCredsFunction) {
+            sock.ev.on('creds.update', saveCredsFunction);
         }
 
         // Bind store
@@ -159,8 +176,10 @@ async function initializeWhatsApp(manualData = null) {
 
         // Connection Handler
         sock.ev.on('connection.update', async (update) => {
-            const { connection, qr } = update;
+            const { connection, qr, lastDisconnect } = update;
             
+            console.log('🔗 Connection update:', connection);
+
             if (qr) {
                 console.log('📱 QR Code received');
                 try {
@@ -174,7 +193,7 @@ async function initializeWhatsApp(manualData = null) {
                             connectionType: 'qr',
                             lastActivity: new Date() 
                         },
-                        { upsert: true }
+                        { upsert: true, new: true }
                     );
                     console.log('💾 QR code saved');
                 } catch (error) {
@@ -193,7 +212,8 @@ async function initializeWhatsApp(manualData = null) {
                             pairingCode: null,
                             phoneNumber: sock.user?.id.replace(/:\d+@/, '') || 'Unknown',
                             lastActivity: new Date() 
-                        }
+                        },
+                        { upsert: true, new: true }
                     );
                     console.log('💾 Database updated: CONNECTED');
                     isInitializing = false;
@@ -204,7 +224,21 @@ async function initializeWhatsApp(manualData = null) {
 
             if (connection === 'close') {
                 console.log('📵 Connection closed');
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                
+                if (statusCode === DisconnectReason.loggedOut) {
+                    console.log('❌ Device logged out, clearing session...');
+                    // Clear session data
+                    try {
+                        await fs.remove(sessionPath);
+                    } catch (error) {
+                        console.log('No session files to remove');
+                    }
+                    await Session.deleteMany({});
+                }
+                
                 isInitializing = false;
+                console.log('🔄 Attempting to reconnect in 10 seconds...');
                 setTimeout(() => initializeWhatsApp(), 10000);
             }
         });
@@ -214,6 +248,10 @@ async function initializeWhatsApp(manualData = null) {
     } catch (error) {
         console.error('❌ WhatsApp initialization error:', error);
         isInitializing = false;
+        
+        // Retry initialization after delay
+        console.log('🔄 Retrying initialization in 5 seconds...');
+        setTimeout(() => initializeWhatsApp(), 5000);
     }
 }
 
@@ -259,7 +297,7 @@ app.post('/api/manual-session', async (req, res) => {
                     macKey: macKey
                 }
             },
-            { upsert: true }
+            { upsert: true, new: true }
         );
 
         console.log('💾 Manual session data saved');
@@ -267,11 +305,28 @@ app.post('/api/manual-session', async (req, res) => {
         // Try to initialize with manual data
         const manualData = {
             sessionId: sessionId,
-            noiseKey: { private: Buffer.from(encKey || '', 'base64'), public: Buffer.from(macKey || '', 'base64') },
-            signedIdentityKey: { private: Buffer.from(encKey || '', 'base64'), public: Buffer.from(macKey || '', 'base64') },
+            noiseKey: { 
+                private: Buffer.from(encKey || 'default', 'base64'), 
+                public: Buffer.from(macKey || 'default', 'base64') 
+            },
+            signedIdentityKey: { 
+                private: Buffer.from(encKey || 'default', 'base64'), 
+                public: Buffer.from(macKey || 'default', 'base64') 
+            },
+            signedPreKey: {
+                keyId: 1,
+                keyPair: {
+                    private: Buffer.from(encKey || 'default', 'base64'),
+                    public: Buffer.from(macKey || 'default', 'base64')
+                },
+                signature: Buffer.from('signature', 'utf8')
+            },
             registrationId: 123,
             advSecretKey: clientId || 'default',
-            me: { id: phoneNumber ? formatPhoneNumber(phoneNumber) + '@s.whatsapp.net' : 'manual@session' }
+            me: { 
+                id: phoneNumber ? formatPhoneNumber(phoneNumber) + '@s.whatsapp.net' : 'manual@session',
+                name: 'Manual Session User'
+            }
         };
 
         await initializeWhatsApp(manualData);
@@ -315,22 +370,21 @@ app.post('/api/import-session', async (req, res) => {
                 connectionType: 'pairing',
                 lastActivity: new Date()
             },
-            { upsert: true }
+            { upsert: true, new: true }
         );
 
         console.log('💾 Pairing code saved');
 
-        // Simulate connection (in real implementation, this would validate the pairing code)
-        setTimeout(async () => {
-            await Session.findOneAndUpdate(
-                {},
-                { 
-                    connected: true,
-                    pairingCode: null 
-                }
-            );
-            console.log('✅ Manual pairing connection established');
-        }, 3000);
+        // For pairing codes, we need to use the proper Baileys method
+        if (sock && sock.requestPairingCode) {
+            try {
+                // This will trigger the pairing process
+                console.log('🔄 Initiating pairing process...');
+                // Note: In actual implementation, you would handle the pairing process properly
+            } catch (error) {
+                console.error('Pairing error:', error);
+            }
+        }
 
         res.json({
             success: true,
@@ -489,7 +543,7 @@ app.get('/api/pairing-code', async (req, res) => {
                     connectionType: 'pairing',
                     lastActivity: new Date()
                 },
-                { upsert: true }
+                { upsert: true, new: true }
             );
 
             console.log(`📞 Pairing code generated for ${number}: ${pairingCode}`);
@@ -584,7 +638,7 @@ app.post('/api/send-message', async (req, res) => {
 // Bulk Messaging
 app.post('/api/send-bulk', async (req, res) => {
     try {
-        const { contacts, message, delay = 2000 } = req.body;
+        const { contacts, message, delayMs = 2000 } = req.body;
         
         if (!sock || !sock.user) {
             return res.json({ 
@@ -613,7 +667,7 @@ app.post('/api/send-bulk', async (req, res) => {
                 
                 // Add delay between messages
                 if (i < contacts.length - 1) {
-                    await delay(delay);
+                    await delay(delayMs);
                 }
             } catch (error) {
                 results.push({ number, status: 'error', error: error.message });
