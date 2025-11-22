@@ -1,11 +1,4 @@
 const express = require('express');
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState,
-    makeInMemoryStore,
-    Browsers,
-    delay 
-} = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode');
 const cors = require('cors');
 const mongoose = require('mongoose');
