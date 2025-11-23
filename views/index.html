@@ -489,6 +489,9 @@
                     <button class="nav-tab" onclick="openTab('bulkMessage')">
                         <i class="fas fa-users"></i>Bulk Messaging
                     </button>
+                    <button class="nav-tab" onclick="openTab('autoGenerate')">
+                     <i class="fas fa-robot"></i>Auto Number Generation
+                    </button>
                     <button class="nav-tab" onclick="openTab('numberDetection')">
                         <i class="fas fa-search"></i>Number Detection
                     </button>
@@ -681,6 +684,82 @@
                     </div>
                 </div>
 
+<!-- find new numbers -->
+<div id="autoGenerate" class="tab-content">
+    <div class="card">
+        <h3><i class="fas fa-robot"></i>Automatic Number Generation</h3>
+        
+        <div class="form-group">
+            <label>Generation Method:</label>
+            <select id="genMethod" class="form-control" onchange="toggleGenOptions()">
+                <option value="prefix">By Prefix</option>
+                <option value="sequential">Sequential</option>
+                <option value="random">Random Mix</option>
+                <option value="area">By Area Code</option>
+            </select>
+        </div>
+
+        <div id="prefixOptions" class="gen-options">
+            <div class="form-group">
+                <label>Mobile Prefix:</label>
+                <select id="numberPrefix" class="form-control">
+                    <option value="77">77</option>
+                    <option value="76">76</option>
+                    <option value="75">75</option>
+                    <option value="74">74</option>
+                    <option value="71">71</option>
+                    <option value="70">70</option>
+                    <option value="78">78</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="sequentialOptions" class="gen-options" style="display: none;">
+            <div class="form-group">
+                <label>Starting Number:</label>
+                <input type="text" id="startNumber" class="form-control" placeholder="94771230000">
+            </div>
+        </div>
+
+        <div id="areaOptions" class="gen-options" style="display: none;">
+            <div class="form-group">
+                <label>Area Code:</label>
+                <input type="text" id="areaCode" class="form-control" placeholder="11 (Colombo)">
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>Number Count:</label>
+            <input type="number" id="genCount" class="form-control" value="50" min="10" max="500">
+        </div>
+
+        <div class="form-group">
+            <label>Category Name:</label>
+            <input type="text" id="genCategory" class="form-control" value="Auto Generated Contacts">
+        </div>
+
+        <div class="form-group">
+            <label>Business Type:</label>
+            <input type="text" id="genBusiness" class="form-control" placeholder="General, Retail, Service, etc.">
+        </div>
+
+        <div class="form-group">
+            <label>Auto-Detect WhatsApp Numbers:</label>
+            <input type="checkbox" id="autoDetect" checked>
+            <small style="margin-left: 10px;">Immediately detect which numbers are on WhatsApp</small>
+        </div>
+
+        <button class="btn btn-success" onclick="generateNumbers()">
+            <i class="fas fa-cogs"></i>Generate & Detect Numbers
+        </button>
+
+        <button class="btn btn-info" onclick="previewNumbers()" style="margin-left: 10px;">
+            <i class="fas fa-eye"></i>Preview Only
+        </button>
+    </div>
+
+    <div id="generationResults"></div>
+</div>
                 <!-- Number Detection Tab -->
                 <div id="numberDetection" class="tab-content">
                     <div class="card">
@@ -1108,7 +1187,158 @@
                 logMessage('❌ Network error: ' + error.message, 'error');
             }
         }
+// Auto Generation Functions
+function toggleGenOptions() {
+    const method = document.getElementById('genMethod').value;
+    document.querySelectorAll('.gen-options').forEach(opt => {
+        opt.style.display = 'none';
+    });
+    document.getElementById(method + 'Options').style.display = 'block';
+}
 
+async function generateNumbers() {
+    const method = document.getElementById('genMethod').value;
+    const count = parseInt(document.getElementById('genCount').value);
+    const category = document.getElementById('genCategory').value;
+    const businessType = document.getElementById('genBusiness').value;
+    const autoDetect = document.getElementById('autoDetect').checked;
+
+    let requestData = {
+        count: count,
+        categoryName: category,
+        businessType: businessType
+    };
+
+    // Add method-specific data
+    if (method === 'prefix') {
+        requestData.prefix = document.getElementById('numberPrefix').value;
+    } else if (method === 'sequential') {
+        requestData.startNumber = document.getElementById('startNumber').value;
+    } else if (method === 'area') {
+        requestData.areaCode = document.getElementById('areaCode').value;
+    } else if (method === 'random') {
+        requestData.pattern = 'random';
+    }
+
+    try {
+        showLoading('Generating and detecting numbers...');
+        
+        const response = await fetch('/api/auto-numbers/generate-and-detect', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestData)
+        });
+
+        const data = await response.json();
+        hideLoading();
+
+        if (data.success) {
+            const resultsDiv = document.getElementById('generationResults');
+            resultsDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <h4>🎉 Auto Generation Complete!</h4>
+                    <p><strong>Generated:</strong> ${data.generated} numbers</p>
+                    <p><strong>Detected:</strong> ${data.detected} numbers checked</p>
+                    <p><strong>Active WhatsApp:</strong> ${data.active} numbers</p>
+                    <p><strong>Success Rate:</strong> ${data.activePercentage}%</p>
+                    <p><strong>Category:</strong> ${data.category.name} (${data.category.contactCount} contacts)</p>
+                </div>
+                <div class="results-container">
+                    <h5>Generated Numbers Sample:</h5>
+                    ${data.sampleNumbers.map(num => `
+                        <div class="result-item">${num}</div>
+                    `).join('')}
+                </div>
+                <div class="results-container">
+                    <h5>Detection Results:</h5>
+                    ${data.results.slice(0, 20).map(result => `
+                        <div class="result-item ${result.status === 'active' ? 'result-success' : 'result-error'}">
+                            <div>${result.number}</div>
+                            <div>
+                                ${result.status === 'active' ? '✅ Active' : '❌ Not on WhatsApp'}
+                                ${result.profileName ? ` - ${result.profileName}` : ''}
+                            </div>
+                        </div>
+                    `).join('')}
+                    ${data.results.length > 20 ? `<div class="result-item">... and ${data.results.length - 20} more</div>` : ''}
+                </div>
+            `;
+
+            logMessage(`✅ Auto-generated ${data.generated} numbers, found ${data.active} active WhatsApp users`);
+            
+            // Refresh categories list
+            loadCategories();
+        } else {
+            logMessage('❌ Auto generation failed: ' + data.error, 'error');
+        }
+
+    } catch (error) {
+        hideLoading();
+        logMessage('❌ Generation error: ' + error.message, 'error');
+    }
+}
+
+async function previewNumbers() {
+    const method = document.getElementById('genMethod').value;
+    const count = parseInt(document.getElementById('genCount').value);
+
+    let requestData = {
+        pattern: method === 'random' ? 'random' : 'sequential',
+        count: count
+    };
+
+    try {
+        showLoading('Generating number preview...');
+        
+        const response = await fetch('/api/auto-numbers/smart-generation', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestData)
+        });
+
+        const data = await response.json();
+        hideLoading();
+
+        if (data.success) {
+            const resultsDiv = document.getElementById('generationResults');
+            resultsDiv.innerHTML = `
+                <div class="alert alert-info">
+                    <h4>Number Preview</h4>
+                    <p><strong>Pattern:</strong> ${data.pattern}</p>
+                    <p><strong>Count:</strong> ${data.generatedCount} numbers</p>
+                    <p><strong>Suggested Category:</strong> ${data.categorySuggestion}</p>
+                </div>
+                <div class="results-container">
+                    ${data.numbers.map(number => `
+                        <div class="result-item">${number}</div>
+                    `).join('')}
+                </div>
+                <button class="btn btn-primary" onclick="usePreviewedNumbers()" style="margin-top: 15px;">
+                    <i class="fas fa-bolt"></i>Use These Numbers for Detection
+                </button>
+            `;
+
+            // Store numbers for later use
+            window.previewedNumbers = data.numbers;
+        }
+
+    } catch (error) {
+        hideLoading();
+        logMessage('❌ Preview error: ' + error.message, 'error');
+    }
+}
+
+function usePreviewedNumbers() {
+    if (window.previewedNumbers) {
+        document.getElementById('detectionNumbers').value = window.previewedNumbers.join('\n');
+        openTab('numberDetection');
+        logMessage(`📋 ${window.previewedNumbers.length} previewed numbers loaded to detection tab`);
+    }
+}
         // Number Detection Functions
         async function detectActiveNumbers() {
             const numbersText = document.getElementById('detectionNumbers').value;
