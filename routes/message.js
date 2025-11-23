@@ -1,10 +1,30 @@
 const express = require("express");
 const { delay } = require("@whiskeysockets/baileys");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const Session = require("../models/Session");
+const Contact = require("../models/Contact");
 const { getWhatsAppClient } = require("./pair");
 
 const router = express.Router();
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = './uploads';
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+
+const upload = multer({ storage: storage });
 
 // Format phone number
 function formatPhoneNumber(number) {
@@ -23,9 +43,10 @@ function formatPhoneNumber(number) {
 }
 
 // Send Single Message
-router.post("/send-message", async (req, res) => {
+router.post("/send", upload.single('image'), async (req, res) => {
     try {
         const { number, message } = req.body;
+        const image = req.file;
         
         if (!number || !message) {
             return res.json({ 
@@ -45,14 +66,35 @@ router.post("/send-message", async (req, res) => {
 
         const formattedNumber = formatPhoneNumber(number) + '@s.whatsapp.net';
         
-        await client.sendMessage(formattedNumber, { text: message });
+        let messageOptions = { text: message };
         
-        // Update last activity and increment message count
+        // Add image if provided
+        if (image) {
+            messageOptions = {
+                image: { url: image.path },
+                caption: message
+            };
+        }
+        
+        await client.sendMessage(formattedNumber, messageOptions);
+        
+        // Update contact in database
+        await Contact.findOneAndUpdate(
+            { phoneNumber: number },
+            {
+                phoneNumber: number,
+                lastContacted: new Date(),
+                $inc: { messageCount: 1 }
+            },
+            { upsert: true, new: true }
+        );
+        
+        // Update session stats
         await Session.findOneAndUpdate(
             {},
             { 
                 lastActivity: new Date(),
-                $inc: { messageCount: 1 }
+                $inc: { 'stats.totalMessages': 1 }
             },
             { upsert: true, new: true }
         );
@@ -72,9 +114,10 @@ router.post("/send-message", async (req, res) => {
 });
 
 // Bulk Messaging
-router.post("/send-bulk", async (req, res) => {
+router.post("/bulk", upload.single('image'), async (req, res) => {
     try {
         const { contacts, message, delayMs = 2000 } = req.body;
+        const image = req.file;
         
         if (!contacts || !message) {
             return res.json({ 
@@ -92,32 +135,54 @@ router.post("/send-bulk", async (req, res) => {
             });
         }
 
+        const contactList = Array.isArray(contacts) ? contacts : contacts.split('\n').filter(num => num.trim() !== '');
         const results = [];
         let successCount = 0;
 
-        for (let i = 0; i < contacts.length; i++) {
-            const number = contacts[i];
+        for (let i = 0; i < contactList.length; i++) {
+            const number = contactList[i].trim();
             try {
                 const formattedNumber = formatPhoneNumber(number) + '@s.whatsapp.net';
-                await client.sendMessage(formattedNumber, { text: message });
+                
+                let messageOptions = { text: message };
+                
+                if (image) {
+                    messageOptions = {
+                        image: { url: image.path },
+                        caption: message
+                    };
+                }
+                
+                await client.sendMessage(formattedNumber, messageOptions);
                 results.push({ number, status: 'success' });
                 successCount++;
                 
+                // Update contact in database
+                await Contact.findOneAndUpdate(
+                    { phoneNumber: number },
+                    {
+                        phoneNumber: number,
+                        lastContacted: new Date(),
+                        $inc: { messageCount: 1 }
+                    },
+                    { upsert: true, new: true }
+                );
+                
                 // Add delay between messages
-                if (i < contacts.length - 1) {
-                    await delay(delayMs);
+                if (i < contactList.length - 1) {
+                    await delay(parseInt(delayMs));
                 }
             } catch (error) {
                 results.push({ number, status: 'error', error: error.message });
             }
         }
 
-        // Update last activity and message count
+        // Update session stats
         await Session.findOneAndUpdate(
             {},
             { 
                 lastActivity: new Date(),
-                $inc: { messageCount: successCount }
+                $inc: { 'stats.totalMessages': successCount }
             },
             { upsert: true, new: true }
         );
@@ -126,8 +191,8 @@ router.post("/send-bulk", async (req, res) => {
             success: true,
             results: results,
             sent: successCount,
-            failed: contacts.length - successCount,
-            message: 'Sent ' + successCount + '/' + contacts.length + ' messages successfully'
+            failed: contactList.length - successCount,
+            message: 'Sent ' + successCount + '/' + contactList.length + ' messages successfully'
         });
 
     } catch (error) {
@@ -136,23 +201,6 @@ router.post("/send-bulk", async (req, res) => {
             success: false, 
             error: 'Bulk send failed: ' + error.message 
         });
-    }
-});
-
-// Get Statistics
-router.get("/stats", async (req, res) => {
-    try {
-        const session = await Session.findOne({});
-        const client = getWhatsAppClient();
-        
-        res.json({
-            connected: client && client.user,
-            phoneNumber: session?.phoneNumber,
-            lastActivity: session?.lastActivity,
-            totalMessages: session?.messageCount || 0
-        });
-    } catch (error) {
-        res.json({ error: error.message });
     }
 });
 
