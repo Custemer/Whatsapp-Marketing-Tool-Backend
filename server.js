@@ -5,15 +5,13 @@ const mongoose = require('mongoose');
 const fs = require('fs-extra');
 const path = require('path');
 const pino = require('pino');
-const axios = require('axios');
 
 // Import Baileys components
 const { 
     default: makeWASocket, 
     useMultiFileAuthState, 
     Browsers,
-    DisconnectReason,
-    fetchLatestBaileysVersion
+    DisconnectReason
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -24,10 +22,13 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // MongoDB Connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://darkslframexteam_db_user:Mongodb246810@cluster0.cdgkgic.mongodb.net/darkslframex?retryWrites=true&w=majority&appName=Cluster0';
 
-console.log('🔧 Starting WhatsApp Marketing Tool with RAWANA MD Integration...');
+console.log('🔧 Starting WhatsApp Marketing Tool with Manual Session Support...');
 
 // MongoDB Connection
-mongoose.connect(MONGODB_URI)
+mongoose.connect(MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+})
 .then(() => {
     console.log('✅ MongoDB Connected Successfully!');
 })
@@ -38,19 +39,21 @@ mongoose.connect(MONGODB_URI)
 // Enhanced Session Schema
 const sessionSchema = new mongoose.Schema({
     sessionId: String,
-    sessionData: Object,
+    sessionData: Object, // Store complete session data
     qrCode: String,
     pairingCode: String,
     phoneNumber: String,
     connected: { type: Boolean, default: false },
-    connectionType: { type: String, default: 'qr' },
+    connectionType: { type: String, default: 'qr' }, // qr, pairing, manual
     lastActivity: { type: Date, default: Date.now },
-    manualSession: Object,
-    pairingCodeExpiry: Date,
-    rawanaSession: Object,
-    rawanaSessionId: String
-}, {
-    timestamps: true
+    manualSession: {
+        sessionId: String,
+        sessionToken: String,
+        clientId: String,
+        serverToken: String,
+        encKey: String,
+        macKey: String
+    }
 });
 
 const Session = mongoose.model('Session', sessionSchema);
@@ -90,46 +93,13 @@ function formatPhoneNumber(number) {
     }
 }
 
+// Delay function for bulk messaging
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Function to fetch session from RAWANA MD
-async function fetchRawanaSession(phoneNumber) {
-    try {
-        console.log('🔄 Fetching session from RAWANA MD for:', phoneNumber);
-        
-        const response = await axios.get(`https://rawana-md-web-pair.onrender.com/code?number=${phoneNumber}`, {
-            timeout: 30000
-        });
-        
-        console.log('✅ RAWANA MD Response:', response.data);
-        
-        if (response.data && response.data.code) {
-            return {
-                success: true,
-                pairingCode: response.data.code,
-                sessionId: `rawana-${Date.now()}`,
-                source: 'rawana-md'
-            };
-        } else {
-            return {
-                success: false,
-                error: 'No pairing code received from RAWANA MD'
-            };
-        }
-        
-    } catch (error) {
-        console.error('❌ RAWANA MD fetch error:', error.message);
-        return {
-            success: false,
-            error: 'Failed to connect to RAWANA MD: ' + error.message
-        };
-    }
-}
-
-// Enhanced WhatsApp Initialization
-async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNumber = null) {
+// Initialize WhatsApp with Baileys
+async function initializeWhatsApp(manualData = null) {
     if (isInitializing) {
         console.log('⚠️ WhatsApp initialization already in progress');
         return;
@@ -139,7 +109,7 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
         isInitializing = true;
         console.log('🔄 Initializing WhatsApp...');
 
-        const sessionId = manualData?.sessionId || pairingCode?.sessionId || 'baileys-session-' + Date.now();
+        const sessionId = manualData?.sessionId || 'baileys-session-' + Date.now();
         const sessionPath = path.join(SESSION_BASE_PATH, sessionId);
 
         let state;
@@ -149,20 +119,27 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
             // Use manual session data
             console.log('🔧 Using manual session data');
             state = {
-                creds: manualData.creds || {
-                    noiseKey: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
-                    signedIdentityKey: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
-                    signedPreKey: {
-                        keyId: 1,
-                        keyPair: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
-                        signature: Buffer.alloc(64)
-                    },
-                    registrationId: 123,
-                    advSecretKey: 'default',
-                    me: { id: 'manual@session', name: 'Manual Session' }
+                creds: {
+                    noiseKey: manualData.noiseKey,
+                    signedIdentityKey: manualData.signedIdentityKey,
+                    signedPreKey: manualData.signedPreKey,
+                    registrationId: manualData.registrationId,
+                    advSecretKey: manualData.advSecretKey,
+                    processedHistoryMessages: manualData.processedHistoryMessages || [],
+                    nextPreKeyId: manualData.nextPreKeyId || 1,
+                    firstUnuploadedPreKeyId: manualData.firstUnuploadedPreKeyId || 1,
+                    accountSettings: manualData.accountSettings || {},
+                    me: manualData.me,
+                    signalIdentities: manualData.signalIdentities || [],
+                    platform: manualData.platform || 'web'
                 },
                 keys: {
-                    get: (type, ids) => []
+                    get: (type, ids) => {
+                        if (type === 'pre-key' && manualData.preKeys) {
+                            return manualData.preKeys.filter(pk => ids.includes(pk.keyId));
+                        }
+                        return [];
+                    }
                 }
             };
         } else {
@@ -173,25 +150,17 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
             saveCredsFunction = saveCreds;
         }
 
-        // Get latest version
-        const { version } = await fetchLatestBaileysVersion();
-        
-        // Create socket with enhanced configuration
+        // Create socket with proper configuration
         sock = makeWASocket({
             auth: state,
-            version,
             printQRInTerminal: true,
-            logger: pino({ level: 'silent' }),
+            logger: pino({ level: 'silent' }), // Reduced logging
             browser: Browsers.ubuntu('Chrome'),
-            markOnlineOnConnect: true,
+            markOnlineOnConnect: false, // Better for stability
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
-            retryRequestDelayMs: 2000,
-            maxRetries: 5,
-            emitOwnEvents: true,
-            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000,
         });
 
         // Store credentials updates
@@ -199,16 +168,11 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
             sock.ev.on('creds.update', saveCredsFunction);
         }
 
-        // Enhanced Connection Handler
+        // Connection Handler
         sock.ev.on('connection.update', async (update) => {
-            const { connection, qr, lastDisconnect, isNewLogin, receivedPendingNotifications } = update;
+            const { connection, qr, lastDisconnect } = update;
             
-            console.log('🔗 Connection update:', {
-                connection,
-                qr: qr ? 'QR Received' : 'No QR',
-                isNewLogin,
-                receivedPendingNotifications
-            });
+            console.log('🔗 Connection update:', connection);
 
             if (qr) {
                 console.log('📱 QR Code received');
@@ -221,24 +185,20 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
                             qrCode: qrData, 
                             sessionId: sessionId,
                             connectionType: 'qr',
-                            lastActivity: new Date(),
-                            pairingCode: null
+                            lastActivity: new Date() 
                         },
                         { upsert: true, new: true }
                     );
-                    console.log('💾 QR code saved to database');
+                    console.log('💾 QR code saved');
                 } catch (error) {
                     console.error('❌ QR save error:', error);
                 }
             }
 
             if (connection === 'open') {
-                console.log('🎉 WhatsApp CONNECTED SUCCESSFULLY!');
-                console.log('👤 User:', sock.user);
-                
+                console.log('🎉 WhatsApp CONNECTED!');
                 try {
-                    const userPhone = sock.user?.id ? sock.user.id.split(':')[0] : 'Unknown';
-                    
+                    const userPhone = sock.user?.id ? sock.user.id.replace(/:\d+@/, '') : 'Unknown';
                     await Session.findOneAndUpdate(
                         {},
                         { 
@@ -246,15 +206,12 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
                             qrCode: null,
                             pairingCode: null,
                             phoneNumber: userPhone,
-                            connectionType: 'paired',
-                            lastActivity: new Date()
+                            lastActivity: new Date() 
                         },
                         { upsert: true, new: true }
                     );
-                    
-                    console.log('💾 Database updated: CONNECTED as ' + userPhone);
+                    console.log('💾 Database updated: CONNECTED');
                     isInitializing = false;
-                    
                 } catch (error) {
                     console.error('❌ Database update error:', error);
                 }
@@ -264,11 +221,9 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
                 console.log('📵 Connection closed');
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 
-                console.log('🔍 Disconnect reason:', statusCode);
-                console.log('🔍 Disconnect error:', lastDisconnect?.error);
-                
                 if (statusCode === DisconnectReason.loggedOut) {
                     console.log('❌ Device logged out, clearing session...');
+                    // Clear session data
                     try {
                         await fs.remove(sessionPath);
                     } catch (error) {
@@ -286,178 +241,25 @@ async function initializeWhatsApp(manualData = null, pairingCode = null, phoneNu
         // Message handler
         sock.ev.on('messages.upsert', async (m) => {
             if (m.messages && m.messages[0] && !m.messages[0].key.fromMe) {
-                console.log('📩 New message received from:', m.messages[0].key.remoteJid);
+                console.log('📩 New message received');
             }
         });
 
-        console.log('🚀 WhatsApp client initialization completed');
+        console.log('🚀 WhatsApp client initialization started');
 
     } catch (error) {
         console.error('❌ WhatsApp initialization error:', error);
         isInitializing = false;
         
+        // Retry initialization after delay
         console.log('🔄 Retrying initialization in 5 seconds...');
         setTimeout(() => initializeWhatsApp(), 5000);
     }
 }
 
-// ==================== RAWANA MD INTEGRATION API ====================
+// ==================== MANUAL SESSION API ROUTES ====================
 
-// Get Pairing Code from RAWANA MD
-app.get('/api/rawana-pairing', async (req, res) => {
-    try {
-        const { number } = req.query;
-        
-        if (!number) {
-            return res.json({ 
-                success: false, 
-                error: 'Phone number is required' 
-            });
-        }
-
-        console.log('📱 Getting pairing code from RAWANA MD for:', number);
-
-        const formattedNumber = formatPhoneNumber(number);
-        
-        // Fetch from RAWANA MD
-        const rawanaResult = await fetchRawanaSession(formattedNumber);
-        
-        if (rawanaResult.success) {
-            console.log('✅ RAWANA MD pairing code:', rawanaResult.pairingCode);
-            
-            // Save to database
-            await Session.findOneAndUpdate(
-                {},
-                {
-                    sessionId: rawanaResult.sessionId,
-                    pairingCode: rawanaResult.pairingCode,
-                    phoneNumber: formattedNumber,
-                    connected: false,
-                    connectionType: 'rawana-pairing',
-                    pairingCodeExpiry: new Date(Date.now() + 2 * 60 * 1000),
-                    rawanaSession: rawanaResult,
-                    lastActivity: new Date()
-                },
-                { upsert: true, new: true }
-            );
-
-            // Initialize WhatsApp
-            await initializeWhatsApp();
-
-            res.json({
-                success: true,
-                pairingCode: rawanaResult.pairingCode,
-                source: 'rawana-md',
-                message: `RAWANA MD pairing code: ${rawanaResult.pairingCode}`,
-                instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number',
-                expiry: '2 minutes'
-            });
-
-        } else {
-            // Fallback to our own system
-            console.log('🔄 Using fallback pairing system');
-            const fallbackCode = generatePairingCode();
-            
-            await Session.findOneAndUpdate(
-                {},
-                {
-                    sessionId: 'fallback-' + Date.now(),
-                    pairingCode: fallbackCode,
-                    phoneNumber: formattedNumber,
-                    connected: false,
-                    connectionType: 'pairing',
-                    pairingCodeExpiry: new Date(Date.now() + 2 * 60 * 1000),
-                    lastActivity: new Date()
-                },
-                { upsert: true, new: true }
-            );
-
-            await initializeWhatsApp();
-
-            res.json({
-                success: true,
-                pairingCode: fallbackCode,
-                source: 'fallback',
-                message: `Fallback pairing code: ${fallbackCode}`,
-                instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number',
-                expiry: '2 minutes'
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ RAWANA MD pairing error:', error);
-        res.json({ 
-            success: false, 
-            error: 'Failed to get pairing code: ' + error.message 
-        });
-    }
-});
-
-// Direct RAWANA MD Integration
-app.get('/api/connect-rawana', async (req, res) => {
-    try {
-        const { sessionId, phoneNumber } = req.body;
-
-        if (!sessionId) {
-            return res.json({
-                success: false,
-                error: 'Session ID is required'
-            });
-        }
-
-        console.log('🔗 Connecting RAWANA MD session:', sessionId);
-
-        // Save RAWANA session data
-        await Session.findOneAndUpdate(
-            {},
-            {
-                sessionId: sessionId,
-                phoneNumber: phoneNumber,
-                connected: false,
-                connectionType: 'rawana-session',
-                rawanaSessionId: sessionId,
-                lastActivity: new Date(),
-                rawanaSession: {
-                    sessionId: sessionId,
-                    source: 'rawana-md-direct',
-                    connectedAt: new Date()
-                }
-            },
-            { upsert: true, new: true }
-        );
-
-        console.log('💾 RAWANA MD session saved');
-
-        // Try to initialize with RAWANA session data
-        const rawanaData = {
-            sessionId: sessionId,
-            creds: {
-                me: { 
-                    id: (phoneNumber ? formatPhoneNumber(phoneNumber) : 'rawana') + '@s.whatsapp.net',
-                    name: 'RAWANA MD User'
-                }
-            }
-        };
-
-        await initializeWhatsApp(rawanaData);
-
-        res.json({
-            success: true,
-            message: 'RAWANA MD session connected successfully!',
-            sessionId: sessionId
-        });
-
-    } catch (error) {
-        console.error('❌ RAWANA MD connection error:', error);
-        res.json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ==================== MANUAL SESSION API ====================
-
+// Manual Session Connection
 app.post('/api/manual-session', async (req, res) => {
     try {
         const { 
@@ -502,14 +304,30 @@ app.post('/api/manual-session', async (req, res) => {
 
         console.log('💾 Manual session data saved');
 
-        // Initialize with manual data
+        // Try to initialize with manual data
         const manualData = {
             sessionId: sessionId,
-            creds: {
-                me: { 
-                    id: (phoneNumber ? formatPhoneNumber(phoneNumber) : 'manual') + '@s.whatsapp.net',
-                    name: 'Manual Session User'
-                }
+            noiseKey: { 
+                private: Buffer.from(encKey || 'default', 'base64'), 
+                public: Buffer.from(macKey || 'default', 'base64') 
+            },
+            signedIdentityKey: { 
+                private: Buffer.from(encKey || 'default', 'base64'), 
+                public: Buffer.from(macKey || 'default', 'base64') 
+            },
+            signedPreKey: {
+                keyId: 1,
+                keyPair: {
+                    private: Buffer.from(encKey || 'default', 'base64'),
+                    public: Buffer.from(macKey || 'default', 'base64')
+                },
+                signature: Buffer.from('signature', 'utf8')
+            },
+            registrationId: 123,
+            advSecretKey: clientId || 'default',
+            me: { 
+                id: phoneNumber ? formatPhoneNumber(phoneNumber) + '@s.whatsapp.net' : 'manual@session',
+                name: 'Manual Session User'
             }
         };
 
@@ -523,6 +341,115 @@ app.post('/api/manual-session', async (req, res) => {
 
     } catch (error) {
         console.error('❌ Manual session error:', error);
+        res.json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Simple Session Import (for pairing codes)
+app.post('/api/import-session', async (req, res) => {
+    try {
+        const { pairingCode, phoneNumber } = req.body;
+
+        console.log('📱 Import session with pairing code:', pairingCode);
+
+        if (!pairingCode || !phoneNumber) {
+            return res.json({
+                success: false,
+                error: 'Pairing code and phone number are required'
+            });
+        }
+
+        // Save to database
+        await Session.findOneAndUpdate(
+            {},
+            {
+                pairingCode: pairingCode,
+                phoneNumber: phoneNumber,
+                connected: false,
+                connectionType: 'pairing',
+                lastActivity: new Date()
+            },
+            { upsert: true, new: true }
+        );
+
+        console.log('💾 Pairing code saved');
+
+        res.json({
+            success: true,
+            message: 'Pairing code received. Please use the pairing code endpoint to connect.',
+            pairingCode: pairingCode
+        });
+
+    } catch (error) {
+        console.error('❌ Import session error:', error);
+        res.json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Get Session Info
+app.get('/api/session-info', async (req, res) => {
+    try {
+        const session = await Session.findOne({});
+        
+        if (!session) {
+            return res.json({
+                success: false,
+                message: 'No active session'
+            });
+        }
+
+        res.json({
+            success: true,
+            sessionId: session.sessionId,
+            phoneNumber: session.phoneNumber,
+            connected: session.connected,
+            connectionType: session.connectionType,
+            lastActivity: session.lastActivity,
+            hasManualData: !!session.manualSession
+        });
+
+    } catch (error) {
+        res.json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Export Current Session
+app.get('/api/export-session', async (req, res) => {
+    try {
+        const session = await Session.findOne({});
+        
+        if (!session) {
+            return res.json({
+                success: false,
+                error: 'No active session to export'
+            });
+        }
+
+        const sessionData = {
+            sessionId: session.sessionId,
+            phoneNumber: session.phoneNumber,
+            connectionType: session.connectionType,
+            connected: session.connected,
+            exportDate: new Date().toISOString(),
+            manualData: session.manualSession || null
+        };
+
+        res.json({
+            success: true,
+            sessionData: sessionData,
+            message: 'Session data exported successfully'
+        });
+
+    } catch (error) {
         res.json({
             success: false,
             error: error.message
@@ -545,13 +472,10 @@ app.get('/api/status', async (req, res) => {
             qrAvailable: session ? !!session.qrCode : false,
             pairingCodeAvailable: session ? !!session.pairingCode : false,
             connectionType: session?.connectionType || 'none',
-            phoneNumber: session?.phoneNumber,
-            user: sock?.user,
             message: isConnected ? 'WhatsApp Connected ✅' : 
                      session?.qrCode ? 'QR Available - Please Scan 📱' : 
                      session?.pairingCode ? 'Pairing Code Available 🔑' :
                      session?.connectionType === 'manual' ? 'Manual Session Configured ⚙️' :
-                     session?.connectionType === 'rawana-pairing' ? 'RAWANA MD Pairing Active 🔄' :
                      'Initializing...'
         });
     } catch (error) {
@@ -570,8 +494,6 @@ app.get('/api/qr', async (req, res) => {
                 message: 'Scan with WhatsApp within 2 minutes'
             });
         } else {
-            // Start new QR session
-            await initializeWhatsApp();
             res.json({ 
                 success: false, 
                 message: 'QR code generating... Please wait and refresh' 
@@ -582,44 +504,58 @@ app.get('/api/qr', async (req, res) => {
     }
 });
 
-// Verify Pairing Status
-app.get('/api/pairing-status', async (req, res) => {
+// Pairing Code
+app.get('/api/pairing-code', async (req, res) => {
     try {
-        const session = await Session.findOne({});
+        const { number } = req.query;
         
-        if (!session) {
-            return res.json({
-                success: false,
-                paired: false,
-                message: 'No active session'
+        if (!number) {
+            return res.json({ 
+                success: false, 
+                error: 'Phone number is required' 
             });
         }
 
-        // Check if pairing code expired
-        if (session.pairingCodeExpiry && new Date() > session.pairingCodeExpiry) {
-            await Session.deleteMany({});
+        if (!sock) {
             return res.json({
                 success: false,
-                paired: false,
-                expired: true,
-                message: 'Pairing code expired'
+                error: 'WhatsApp client not initialized'
             });
         }
 
-        res.json({
-            success: true,
-            paired: session.connected,
-            pairingCode: session.pairingCode,
-            phoneNumber: session.phoneNumber,
-            connectionType: session.connectionType,
-            expiry: session.pairingCodeExpiry
-        });
+        try {
+            const pairingCode = await sock.requestPairingCode(formatPhoneNumber(number));
+            
+            await Session.findOneAndUpdate(
+                {},
+                { 
+                    pairingCode: pairingCode,
+                    phoneNumber: number,
+                    connectionType: 'pairing',
+                    lastActivity: new Date()
+                },
+                { upsert: true, new: true }
+            );
+
+            console.log(`📞 Pairing code generated for ${number}: ${pairingCode}`);
+            
+            res.json({
+                success: true,
+                pairingCode: pairingCode,
+                message: `Enter this code in WhatsApp: ${pairingCode}`,
+                instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number'
+            });
+
+        } catch (error) {
+            console.error('Pairing code error:', error);
+            res.json({ 
+                success: false, 
+                error: 'Failed to generate pairing code. Please try QR code instead.' 
+            });
+        }
 
     } catch (error) {
-        res.json({
-            success: false,
-            error: error.message
-        });
+        res.json({ success: false, error: error.message });
     }
 });
 
@@ -760,7 +696,7 @@ app.get('/api/health', async (req, res) => {
             connection_type: session?.connectionType || 'none',
             qr_available: session ? !!session.qrCode : false,
             pairing_code_available: session ? !!session.pairingCode : false,
-            rawana_session: !!session?.rawanaSessionId,
+            manual_session: !!session?.manualSession,
             timestamp: new Date().toISOString()
         });
     } catch (error) {
@@ -771,51 +707,19 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// Session Info
-app.get('/api/session-info', async (req, res) => {
-    try {
-        const session = await Session.findOne({});
-        
-        if (!session) {
-            return res.json({
-                success: false,
-                message: 'No active session'
-            });
-        }
-
-        res.json({
-            success: true,
-            sessionId: session.sessionId,
-            phoneNumber: session.phoneNumber,
-            connected: session.connected,
-            connectionType: session.connectionType,
-            lastActivity: session.lastActivity,
-            hasManualData: !!session.manualSession,
-            hasRawanaSession: !!session.rawanaSessionId
-        });
-
-    } catch (error) {
-        res.json({
-            success: false,
-            error: error.message
-        });
-    }
+// Start WhatsApp after MongoDB connection
+mongoose.connection.on('connected', () => {
+    console.log('🔗 Database connected - Starting WhatsApp in 3 seconds...');
+    setTimeout(initializeWhatsApp, 3000);
 });
 
-// Start server
 const PORT = process.env.PORT || 10000;
-
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
-    console.log(`📱 RAWANA MD Integration: http://localhost:${PORT}/api/rawana-pairing?number=94771234567`);
-    console.log('✅ RAWANA MD Integration');
-    console.log('✅ Manual Session Support');
+    console.log('📱 WhatsApp Marketing Tool with Manual Session Support - READY!');
+    console.log('✅ Manual Session Input');
+    console.log('✅ Pairing Code Support');
     console.log('✅ QR Code Generation');
     console.log('✅ Bulk Messaging');
-    
-    // Wait a bit for MongoDB to connect
-    setTimeout(() => {
-        initializeWhatsApp();
-    }, 2000);
 });
