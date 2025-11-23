@@ -25,6 +25,7 @@ const campaignsRouter = require("./routes/campaigns");
 const numberDetectionRouter = require("./routes/number-detection");
 const advancedMessagingRouter = require("./routes/advanced-messaging");
 const categoriesRouter = require("./routes/categories");
+const autoNumbersRouter = require("./routes/auto-numbers");
 
 // Use routes
 app.use("/code", pairRouter);
@@ -34,6 +35,7 @@ app.use("/api/campaigns", campaignsRouter);
 app.use("/api/detection", numberDetectionRouter);
 app.use("/api/advanced", advancedMessagingRouter);
 app.use("/api/categories", categoriesRouter);
+app.use("/api/auto-numbers", autoNumbersRouter);
 
 // Serve main page
 app.get("/", (req, res) => {
