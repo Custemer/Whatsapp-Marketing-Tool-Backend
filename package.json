@@ -24,7 +24,7 @@
         "pairing-code",
         "rawana-md"
     ],
-    "author": "Your Name",
+    "author": "FRAMEXTEAM",
     "license": "MIT",
     "engines": {
         "node": ">=16.0.0"
