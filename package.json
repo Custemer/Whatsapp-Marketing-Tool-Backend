@@ -2,7 +2,7 @@
     "name": "whatsapp-marketing-baileys",
     "version": "2.0.0",
     "description": "WhatsApp Marketing Tool with Manual Session Support",
-    "main": "server.js",
+    "main": "index.js",
     "scripts": {
         "start": "node server.js"
     },
