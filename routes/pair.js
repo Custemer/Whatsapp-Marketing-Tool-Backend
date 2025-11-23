@@ -9,9 +9,9 @@ const {
   Browsers,
 } = require("@whiskeysockets/baileys");
 
-const Session = require("./models/Session");
+const Session = require("../models/Session");
 
-let router = express.Router();
+const router = express.Router();
 
 // Global variables to manage WhatsApp connection
 let whatsappClient = null;
@@ -162,7 +162,5 @@ router.get("/status", async (req, res) => {
 });
 
 // Export whatsappClient for use in other files
-module.exports = {
-    router,
-    whatsappClient: () => whatsappClient
-};
+module.exports.getWhatsAppClient = () => whatsappClient;
+module.exports.router = router;
