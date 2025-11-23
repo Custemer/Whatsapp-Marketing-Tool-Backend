@@ -9,9 +9,9 @@ const connectDB = async () => {
             useNewUrlParser: true,
             useUnifiedTopology: true,
         });
-        console.log('MongoDB Connected for WhatsApp Tool');
+        console.log('✅ MongoDB Connected for WhatsApp Marketing Tool');
     } catch (error) {
-        console.error('MongoDB Connection Failed:', error.message);
+        console.error('❌ MongoDB Connection Failed:', error.message);
         process.exit(1);
     }
 };
