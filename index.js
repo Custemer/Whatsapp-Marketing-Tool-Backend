@@ -15,14 +15,12 @@ require("events").EventEmitter.defaultMaxListeners = 500;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.static(path.join(__dirname, 'views')));
 
 // Import routes
 const pairRouter = require("./routes/pair");
 const messageRouter = require("./routes/message");
 const contactsRouter = require("./routes/contacts");
-const groupsRouter = require("./routes/groups");
 const campaignsRouter = require("./routes/campaigns");
 const numberDetectionRouter = require("./routes/number-detection");
 const advancedMessagingRouter = require("./routes/advanced-messaging");
@@ -31,7 +29,6 @@ const advancedMessagingRouter = require("./routes/advanced-messaging");
 app.use("/code", pairRouter);
 app.use("/api/message", messageRouter);
 app.use("/api/contacts", contactsRouter);
-app.use("/api/groups", groupsRouter);
 app.use("/api/campaigns", campaignsRouter);
 app.use("/api/detection", numberDetectionRouter);
 app.use("/api/advanced", advancedMessagingRouter);
@@ -39,6 +36,11 @@ app.use("/api/advanced", advancedMessagingRouter);
 // Serve main page
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "index.html"));
+});
+
+// Health check
+app.get("/health", (req, res) => {
+  res.json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
 // Start the server
