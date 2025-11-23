@@ -1063,90 +1063,114 @@
             }
         }
 
-        // Message Sending Functions
-        async function sendSingleMessage() {
-            const number = document.getElementById('singleNumber').value;
-            const message = document.getElementById('singleMessageText').value;
-            const imageFile = document.getElementById('singleImage').files[0];
-            
-            if (!number || !message) {
-                alert('Please enter both number and message');
-                return;
-            }
-            
-            const formData = new FormData();
-            formData.append('number', number);
-            formData.append('message', message);
-            if (imageFile) {
-                formData.append('image', imageFile);
-            }
-            
-            try {
-                showLoading('Sending message...');
-                const response = await fetch('/api/message/send', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const data = await response.json();
-                hideLoading();
-                
-                if (data.success) {
-                    logMessage(`✅ Message sent to ${number}`);
-                } else {
-                    logMessage('❌ Send failed: ' + data.error, 'error');
-                }
-            } catch (error) {
-                hideLoading();
-                logMessage('❌ Network error: ' + error.message, 'error');
-            }
+       // FIXED: sendSingleMessage function
+async function sendSingleMessage() {
+    const number = document.getElementById('singleNumber').value;
+    const message = document.getElementById('singleMessageText').value;
+    const imageFile = document.getElementById('singleImage').files[0];
+    
+    console.log('Sending message to:', number);
+    console.log('Message:', message);
+    
+    if (!number || !message) {
+        alert('Please enter both number and message');
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('number', number);
+    formData.append('message', message);
+    
+    if (imageFile) {
+        console.log('Image attached:', imageFile.name);
+        formData.append('image', imageFile);
+    }
+    
+    try {
+        showLoading('Sending message...');
+        
+        console.log('Sending request to /api/message/send');
+        const response = await fetch('/api/message/send', {
+            method: 'POST',
+            body: formData
+            // Note: Don't set Content-Type header for FormData - browser will set it automatically
+        });
+        
+        const data = await response.json();
+        console.log('Response received:', data);
+        hideLoading();
+        
+        if (data.success) {
+            logMessage(`✅ Message sent to ${number}`);
+            // Clear form
+            document.getElementById('singleMessageText').value = '';
+            document.getElementById('singleImage').value = '';
+        } else {
+            logMessage('❌ Send failed: ' + data.error, 'error');
         }
+    } catch (error) {
+        hideLoading();
+        console.error('Network error:', error);
+        logMessage('❌ Network error: ' + error.message, 'error');
+    }
+}
 
-        async function sendBulkMessages() {
-            const numbersText = document.getElementById('bulkNumbers').value;
-            const message = document.getElementById('bulkMessageText').value;
-            const delayMs = document.getElementById('bulkDelay').value;
-            const imageFiles = document.getElementById('bulkImages').files;
-            
-            if (!numbersText || !message) {
-                alert('Please enter both numbers and message');
-                return;
+// FIXED: sendBulkMessages function  
+async function sendBulkMessages() {
+    const numbersText = document.getElementById('bulkNumbers').value;
+    const message = document.getElementById('bulkMessageText').value;
+    const delayMs = document.getElementById('bulkDelay').value;
+    const imageFiles = document.getElementById('bulkImages').files;
+    
+    console.log('Bulk sending to numbers:', numbersText);
+    console.log('Message:', message);
+    
+    if (!numbersText || !message) {
+        alert('Please enter both numbers and message');
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('contacts', numbersText);
+    formData.append('message', message);
+    formData.append('delayMs', delayMs);
+    
+    // Add images
+    for (let i = 0; i < imageFiles.length; i++) {
+        console.log('Adding image:', imageFiles[i].name);
+        formData.append('images', imageFiles[i]);
+    }
+    
+    try {
+        showLoading('Sending bulk messages...');
+        console.log('Sending bulk request to /api/message/bulk');
+        
+        const response = await fetch('/api/message/bulk', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        console.log('Bulk response:', data);
+        hideLoading();
+        
+        if (data.success) {
+            logMessage(`✅ Bulk messages sent: ${data.sent}/${data.totalContacts} successful`);
+            if (imageFiles.length > 0) {
+                logMessage(`🖼️ ${imageFiles.length} images used`);
             }
-            
-            const formData = new FormData();
-            formData.append('contacts', numbersText);
-            formData.append('message', message);
-            formData.append('delayMs', delayMs);
-            
-            // Add images
-            for (let i = 0; i < imageFiles.length; i++) {
-                formData.append('images', imageFiles[i]);
-            }
-            
-            try {
-                showLoading('Sending bulk messages...');
-                const response = await fetch('/api/advanced/bulk-with-images', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const data = await response.json();
-                hideLoading();
-                
-                if (data.success) {
-                    logMessage(`✅ Bulk messages sent: ${data.sent}/${data.totalContacts} successful`);
-                    if (data.imagesUsed > 0) {
-                        logMessage(`🖼️ Images used: ${data.imagesUsed}`);
-                    }
-                } else {
-                    logMessage('❌ Bulk send failed: ' + data.error, 'error');
-                }
-            } catch (error) {
-                hideLoading();
-                logMessage('❌ Network error: ' + error.message, 'error');
-            }
+            // Clear form
+            document.getElementById('bulkMessageText').value = '';
+            document.getElementById('bulkImages').value = '';
+        } else {
+            logMessage('❌ Bulk send failed: ' + data.error, 'error');
         }
-
+    } catch (error) {
+        hideLoading();
+        console.error('Bulk network error:', error);
+        logMessage('❌ Network error: ' + error.message, 'error');
+    }
+}
         // Category-based messaging
         async function sendCategoryMessages() {
             const categoryId = document.getElementById('categorySelect').value;
