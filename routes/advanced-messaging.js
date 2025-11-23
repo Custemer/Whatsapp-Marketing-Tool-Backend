@@ -233,6 +233,169 @@ function personalizeMessage(template, contact) {
     message = message.replace(/{{phone}}/g, contact.phoneNumber);
     message = message.replace(/{{location}}/g, contact.location || 'your area');
     message = message.replace(/{{business}}/g, contact.businessType || 'business');
+
+// Add this new endpoint to advanced-messaging.js
+
+// Category-based messaging
+router.post("/category-bulk", async (req, res) => {
+    try {
+        const { 
+            categoryId,
+            message,
+            delayMs = 2000,
+            personalization = true
+        } = req.body;
+        
+        if (!categoryId || !message) {
+            return res.json({ 
+                success: false, 
+                error: 'Category ID and message are required' 
+            });
+        }
+
+        const client = getWhatsAppClient();
+        
+        if (!client || !client.user) {
+            return res.json({ 
+                success: false, 
+                error: 'WhatsApp not connected' 
+            });
+        }
+
+        // Get category and its contacts
+        const Category = require('../models/Category');
+        const category = await Category.findById(categoryId);
+        
+        if (!category) {
+            return res.json({ 
+                success: false, 
+                error: 'Category not found' 
+            });
+        }
+
+        // Build filter query based on category filters
+        const filterQuery = buildFilterQuery(category.filters);
+        filterQuery.categories = categoryId; // Include category filter
+
+        const contacts = await Contact.find(filterQuery);
+        
+        if (contacts.length === 0) {
+            return res.json({ 
+                success: false, 
+                error: 'No contacts found in this category' 
+            });
+        }
+
+        const results = [];
+        let successCount = 0;
+
+        for (let i = 0; i < contacts.length; i++) {
+            const contact = contacts[i];
+            
+            try {
+                const formattedNumber = contact.phoneNumber + '@s.whatsapp.net';
+                
+                // Personalize message
+                let personalizedMessage = message;
+                if (personalization) {
+                    personalizedMessage = personalizeMessage(message, contact);
+                }
+                
+                await client.sendMessage(formattedNumber, { text: personalizedMessage });
+                results.push({ 
+                    number: contact.phoneNumber, 
+                    status: 'success',
+                    personalized: personalization
+                });
+                successCount++;
+                
+                // Update contact
+                contact.lastContacted = new Date();
+                contact.messageCount += 1;
+                await contact.save();
+                
+                // Add delay
+                if (i < contacts.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, parseInt(delayMs)));
+                }
+                
+            } catch (error) {
+                results.push({ 
+                    number: contact.phoneNumber, 
+                    status: 'error', 
+                    error: error.message 
+                });
+            }
+        }
+
+        // Update stats
+        await Session.findOneAndUpdate(
+            {},
+            { 
+                lastActivity: new Date(),
+                $inc: { 'stats.totalMessages': successCount }
+            }
+        );
+
+        res.json({
+            success: true,
+            category: category.name,
+            results: results,
+            sent: successCount,
+            failed: contacts.length - successCount,
+            totalContacts: contacts.length,
+            personalization: personalization,
+            message: `Category messaging completed: ${successCount}/${contacts.length} messages sent to ${category.name}`
+        });
+
+    } catch (error) {
+        console.error('Category bulk messaging error:', error);
+        res.json({ 
+            success: false, 
+            error: 'Category messaging failed: ' + error.message 
+        });
+    }
+});
+
+// Helper function to build filter query (same as in categories.js)
+function buildFilterQuery(filters) {
+    const query = {};
+    
+    if (filters.businessType && filters.businessType.length > 0) {
+        query.businessType = { $in: filters.businessType };
+    }
+    
+    if (filters.location && filters.location.length > 0) {
+        query.location = { $in: filters.location };
+    }
+    
+    if (filters.status) {
+        query.status = filters.status;
+    }
+    
+    if (filters.minMessages !== undefined) {
+        query.messageCount = { $gte: filters.minMessages };
+    }
+    
+    if (filters.maxMessages !== undefined) {
+        if (query.messageCount) {
+            query.messageCount.$lte = filters.maxMessages;
+        } else {
+            query.messageCount = { $lte: filters.maxMessages };
+        }
+    }
+    
+    if (filters.lastContacted && filters.lastContacted.from) {
+        query.lastContacted = { $gte: new Date(filters.lastContacted.from) };
+        
+        if (filters.lastContacted.to) {
+            query.lastContacted.$lte = new Date(filters.lastContacted.to);
+        }
+    }
+    
+    return query;
+}
+
     
     return message;
 }
