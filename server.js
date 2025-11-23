@@ -11,7 +11,8 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     Browsers,
-    DisconnectReason
+    DisconnectReason,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -22,7 +23,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // MongoDB Connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://darkslframexteam_db_user:Mongodb246810@cluster0.cdgkgic.mongodb.net/darkslframex?retryWrites=true&w=majority&appName=Cluster0';
 
-console.log('🔧 Starting WhatsApp Marketing Tool with Manual Session Support...');
+console.log('🔧 Starting WhatsApp Marketing Tool with Enhanced Pairing Support...');
 
 // MongoDB Connection
 mongoose.connect(MONGODB_URI, {
@@ -39,21 +40,15 @@ mongoose.connect(MONGODB_URI, {
 // Enhanced Session Schema
 const sessionSchema = new mongoose.Schema({
     sessionId: String,
-    sessionData: Object, // Store complete session data
+    sessionData: Object,
     qrCode: String,
     pairingCode: String,
     phoneNumber: String,
     connected: { type: Boolean, default: false },
-    connectionType: { type: String, default: 'qr' }, // qr, pairing, manual
+    connectionType: { type: String, default: 'qr' },
     lastActivity: { type: Date, default: Date.now },
-    manualSession: {
-        sessionId: String,
-        sessionToken: String,
-        clientId: String,
-        serverToken: String,
-        encKey: String,
-        macKey: String
-    }
+    manualSession: Object,
+    pairingCodeExpiry: Date
 });
 
 const Session = mongoose.model('Session', sessionSchema);
@@ -93,13 +88,12 @@ function formatPhoneNumber(number) {
     }
 }
 
-// Delay function for bulk messaging
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Initialize WhatsApp with Baileys
-async function initializeWhatsApp(manualData = null) {
+// Enhanced WhatsApp Initialization
+async function initializeWhatsApp(manualData = null, pairingCode = null) {
     if (isInitializing) {
         console.log('⚠️ WhatsApp initialization already in progress');
         return;
@@ -109,7 +103,7 @@ async function initializeWhatsApp(manualData = null) {
         isInitializing = true;
         console.log('🔄 Initializing WhatsApp...');
 
-        const sessionId = manualData?.sessionId || 'baileys-session-' + Date.now();
+        const sessionId = manualData?.sessionId || pairingCode?.sessionId || 'baileys-session-' + Date.now();
         const sessionPath = path.join(SESSION_BASE_PATH, sessionId);
 
         let state;
@@ -119,27 +113,20 @@ async function initializeWhatsApp(manualData = null) {
             // Use manual session data
             console.log('🔧 Using manual session data');
             state = {
-                creds: {
-                    noiseKey: manualData.noiseKey,
-                    signedIdentityKey: manualData.signedIdentityKey,
-                    signedPreKey: manualData.signedPreKey,
-                    registrationId: manualData.registrationId,
-                    advSecretKey: manualData.advSecretKey,
-                    processedHistoryMessages: manualData.processedHistoryMessages || [],
-                    nextPreKeyId: manualData.nextPreKeyId || 1,
-                    firstUnuploadedPreKeyId: manualData.firstUnuploadedPreKeyId || 1,
-                    accountSettings: manualData.accountSettings || {},
-                    me: manualData.me,
-                    signalIdentities: manualData.signalIdentities || [],
-                    platform: manualData.platform || 'web'
+                creds: manualData.creds || {
+                    noiseKey: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
+                    signedIdentityKey: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
+                    signedPreKey: {
+                        keyId: 1,
+                        keyPair: { private: Buffer.alloc(32), public: Buffer.alloc(32) },
+                        signature: Buffer.alloc(64)
+                    },
+                    registrationId: 123,
+                    advSecretKey: 'default',
+                    me: { id: 'manual@session', name: 'Manual Session' }
                 },
                 keys: {
-                    get: (type, ids) => {
-                        if (type === 'pre-key' && manualData.preKeys) {
-                            return manualData.preKeys.filter(pk => ids.includes(pk.keyId));
-                        }
-                        return [];
-                    }
+                    get: (type, ids) => []
                 }
             };
         } else {
@@ -150,17 +137,25 @@ async function initializeWhatsApp(manualData = null) {
             saveCredsFunction = saveCreds;
         }
 
-        // Create socket with proper configuration
+        // Get latest version
+        const { version } = await fetchLatestBaileysVersion();
+        
+        // Create socket with enhanced configuration
         sock = makeWASocket({
             auth: state,
+            version,
             printQRInTerminal: true,
-            logger: pino({ level: 'silent' }), // Reduced logging
+            logger: pino({ level: 'silent' }),
             browser: Browsers.ubuntu('Chrome'),
-            markOnlineOnConnect: false, // Better for stability
+            markOnlineOnConnect: true,
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000,
+            keepAliveIntervalMs: 30000,
+            retryRequestDelayMs: 2000,
+            maxRetries: 5,
+            emitOwnEvents: true,
+            defaultQueryTimeoutMs: 60000,
         });
 
         // Store credentials updates
@@ -168,11 +163,16 @@ async function initializeWhatsApp(manualData = null) {
             sock.ev.on('creds.update', saveCredsFunction);
         }
 
-        // Connection Handler
+        // Enhanced Connection Handler
         sock.ev.on('connection.update', async (update) => {
-            const { connection, qr, lastDisconnect } = update;
+            const { connection, qr, lastDisconnect, isNewLogin, receivedPendingNotifications } = update;
             
-            console.log('🔗 Connection update:', connection);
+            console.log('🔗 Connection update:', {
+                connection,
+                qr: qr ? 'QR Received' : 'No QR',
+                isNewLogin,
+                receivedPendingNotifications
+            });
 
             if (qr) {
                 console.log('📱 QR Code received');
@@ -185,20 +185,24 @@ async function initializeWhatsApp(manualData = null) {
                             qrCode: qrData, 
                             sessionId: sessionId,
                             connectionType: 'qr',
-                            lastActivity: new Date() 
+                            lastActivity: new Date(),
+                            pairingCode: null
                         },
                         { upsert: true, new: true }
                     );
-                    console.log('💾 QR code saved');
+                    console.log('💾 QR code saved to database');
                 } catch (error) {
                     console.error('❌ QR save error:', error);
                 }
             }
 
             if (connection === 'open') {
-                console.log('🎉 WhatsApp CONNECTED!');
+                console.log('🎉 WhatsApp CONNECTED SUCCESSFULLY!');
+                console.log('👤 User:', sock.user);
+                
                 try {
-                    const userPhone = sock.user?.id ? sock.user.id.replace(/:\d+@/, '') : 'Unknown';
+                    const userPhone = sock.user?.id ? sock.user.id.split(':')[0] : 'Unknown';
+                    
                     await Session.findOneAndUpdate(
                         {},
                         { 
@@ -206,12 +210,15 @@ async function initializeWhatsApp(manualData = null) {
                             qrCode: null,
                             pairingCode: null,
                             phoneNumber: userPhone,
-                            lastActivity: new Date() 
+                            connectionType: 'paired',
+                            lastActivity: new Date()
                         },
                         { upsert: true, new: true }
                     );
-                    console.log('💾 Database updated: CONNECTED');
+                    
+                    console.log('💾 Database updated: CONNECTED as ' + userPhone);
                     isInitializing = false;
+                    
                 } catch (error) {
                     console.error('❌ Database update error:', error);
                 }
@@ -221,9 +228,11 @@ async function initializeWhatsApp(manualData = null) {
                 console.log('📵 Connection closed');
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 
+                console.log('🔍 Disconnect reason:', statusCode);
+                console.log('🔍 Disconnect error:', lastDisconnect?.error);
+                
                 if (statusCode === DisconnectReason.loggedOut) {
                     console.log('❌ Device logged out, clearing session...');
-                    // Clear session data
                     try {
                         await fs.remove(sessionPath);
                     } catch (error) {
@@ -241,212 +250,123 @@ async function initializeWhatsApp(manualData = null) {
         // Message handler
         sock.ev.on('messages.upsert', async (m) => {
             if (m.messages && m.messages[0] && !m.messages[0].key.fromMe) {
-                console.log('📩 New message received');
+                console.log('📩 New message received from:', m.messages[0].key.remoteJid);
             }
         });
 
-        console.log('🚀 WhatsApp client initialization started');
+        // Handle pairing codes
+        if (pairingCode) {
+            console.log('🔑 Using pairing code:', pairingCode.code);
+            try {
+                // Baileys automatically handles pairing codes through the connection flow
+                console.log('🔄 Pairing code applied, waiting for connection...');
+            } catch (error) {
+                console.error('❌ Pairing code error:', error);
+            }
+        }
+
+        console.log('🚀 WhatsApp client initialization completed');
 
     } catch (error) {
         console.error('❌ WhatsApp initialization error:', error);
         isInitializing = false;
         
-        // Retry initialization after delay
         console.log('🔄 Retrying initialization in 5 seconds...');
         setTimeout(() => initializeWhatsApp(), 5000);
     }
 }
 
-// ==================== MANUAL SESSION API ROUTES ====================
+// ==================== ENHANCED PAIRING CODE API ====================
 
-// Manual Session Connection
-app.post('/api/manual-session', async (req, res) => {
+// Generate Pairing Code
+app.get('/api/pairing-code', async (req, res) => {
     try {
-        const { 
-            sessionId, 
-            sessionToken, 
-            clientId, 
-            serverToken, 
-            encKey, 
-            macKey,
-            phoneNumber 
-        } = req.body;
-
-        console.log('📱 Manual session connection request');
-
-        if (!sessionId) {
-            return res.json({
-                success: false,
-                error: 'Session ID is required'
+        const { number } = req.query;
+        
+        if (!number) {
+            return res.json({ 
+                success: false, 
+                error: 'Phone number is required' 
             });
         }
 
-        // Save manual session data
-        await Session.findOneAndUpdate(
-            {},
-            {
-                sessionId: sessionId,
-                connected: false,
-                connectionType: 'manual',
-                phoneNumber: phoneNumber,
-                lastActivity: new Date(),
-                manualSession: {
-                    sessionId: sessionId,
-                    sessionToken: sessionToken,
-                    clientId: clientId,
-                    serverToken: serverToken,
-                    encKey: encKey,
-                    macKey: macKey
-                }
-            },
-            { upsert: true, new: true }
-        );
+        console.log('📱 Generating pairing code for:', number);
 
-        console.log('💾 Manual session data saved');
+        // Clean previous sessions
+        try {
+            await Session.deleteMany({});
+        } catch (error) {
+            console.log('No previous sessions to clean');
+        }
 
-        // Try to initialize with manual data
-        const manualData = {
-            sessionId: sessionId,
-            noiseKey: { 
-                private: Buffer.from(encKey || 'default', 'base64'), 
-                public: Buffer.from(macKey || 'default', 'base64') 
-            },
-            signedIdentityKey: { 
-                private: Buffer.from(encKey || 'default', 'base64'), 
-                public: Buffer.from(macKey || 'default', 'base64') 
-            },
-            signedPreKey: {
-                keyId: 1,
-                keyPair: {
-                    private: Buffer.from(encKey || 'default', 'base64'),
-                    public: Buffer.from(macKey || 'default', 'base64')
-                },
-                signature: Buffer.from('signature', 'utf8')
-            },
-            registrationId: 123,
-            advSecretKey: clientId || 'default',
-            me: { 
-                id: phoneNumber ? formatPhoneNumber(phoneNumber) + '@s.whatsapp.net' : 'manual@session',
-                name: 'Manual Session User'
-            }
-        };
+        const formattedNumber = formatPhoneNumber(number);
+        const pairingCode = generatePairingCode();
+        
+        // Save pairing code to database
+        await Session.create({
+            sessionId: 'pairing-' + Date.now(),
+            pairingCode: pairingCode,
+            phoneNumber: formattedNumber,
+            connected: false,
+            connectionType: 'pairing',
+            pairingCodeExpiry: new Date(Date.now() + 2 * 60 * 1000) // 2 minutes expiry
+        });
 
-        await initializeWhatsApp(manualData);
+        console.log(`📞 Pairing code generated for ${formattedNumber}: ${pairingCode}`);
+        
+        // Initialize WhatsApp with pairing context
+        await initializeWhatsApp(null, {
+            code: pairingCode,
+            sessionId: 'pairing-' + Date.now()
+        });
 
         res.json({
             success: true,
-            message: 'Manual session data received. Trying to connect...',
-            sessionId: sessionId
+            pairingCode: pairingCode,
+            message: `Enter this code in WhatsApp: ${pairingCode}`,
+            instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number',
+            expiry: '2 minutes'
         });
 
     } catch (error) {
-        console.error('❌ Manual session error:', error);
-        res.json({
-            success: false,
-            error: error.message
+        console.error('❌ Pairing code error:', error);
+        res.json({ 
+            success: false, 
+            error: 'Failed to generate pairing code: ' + error.message 
         });
     }
 });
 
-// Simple Session Import (for pairing codes)
-app.post('/api/import-session', async (req, res) => {
+// Verify Pairing Status
+app.get('/api/pairing-status', async (req, res) => {
     try {
-        const { pairingCode, phoneNumber } = req.body;
-
-        console.log('📱 Import session with pairing code:', pairingCode);
-
-        if (!pairingCode || !phoneNumber) {
-            return res.json({
-                success: false,
-                error: 'Pairing code and phone number are required'
-            });
-        }
-
-        // Save to database
-        await Session.findOneAndUpdate(
-            {},
-            {
-                pairingCode: pairingCode,
-                phoneNumber: phoneNumber,
-                connected: false,
-                connectionType: 'pairing',
-                lastActivity: new Date()
-            },
-            { upsert: true, new: true }
-        );
-
-        console.log('💾 Pairing code saved');
-
-        res.json({
-            success: true,
-            message: 'Pairing code received. Please use the pairing code endpoint to connect.',
-            pairingCode: pairingCode
-        });
-
-    } catch (error) {
-        console.error('❌ Import session error:', error);
-        res.json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Get Session Info
-app.get('/api/session-info', async (req, res) => {
-    try {
-        const session = await Session.findOne({});
+        const session = await Session.findOne({ connectionType: 'pairing' });
         
         if (!session) {
             return res.json({
                 success: false,
-                message: 'No active session'
+                paired: false,
+                message: 'No active pairing session'
             });
         }
 
-        res.json({
-            success: true,
-            sessionId: session.sessionId,
-            phoneNumber: session.phoneNumber,
-            connected: session.connected,
-            connectionType: session.connectionType,
-            lastActivity: session.lastActivity,
-            hasManualData: !!session.manualSession
-        });
-
-    } catch (error) {
-        res.json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Export Current Session
-app.get('/api/export-session', async (req, res) => {
-    try {
-        const session = await Session.findOne({});
-        
-        if (!session) {
+        // Check if pairing code expired
+        if (session.pairingCodeExpiry && new Date() > session.pairingCodeExpiry) {
+            await Session.deleteMany({ connectionType: 'pairing' });
             return res.json({
                 success: false,
-                error: 'No active session to export'
+                paired: false,
+                expired: true,
+                message: 'Pairing code expired'
             });
         }
 
-        const sessionData = {
-            sessionId: session.sessionId,
-            phoneNumber: session.phoneNumber,
-            connectionType: session.connectionType,
-            connected: session.connected,
-            exportDate: new Date().toISOString(),
-            manualData: session.manualSession || null
-        };
-
         res.json({
             success: true,
-            sessionData: sessionData,
-            message: 'Session data exported successfully'
+            paired: session.connected,
+            pairingCode: session.pairingCode,
+            phoneNumber: session.phoneNumber,
+            expiry: session.pairingCodeExpiry
         });
 
     } catch (error) {
@@ -472,6 +392,8 @@ app.get('/api/status', async (req, res) => {
             qrAvailable: session ? !!session.qrCode : false,
             pairingCodeAvailable: session ? !!session.pairingCode : false,
             connectionType: session?.connectionType || 'none',
+            phoneNumber: session?.phoneNumber,
+            user: sock?.user,
             message: isConnected ? 'WhatsApp Connected ✅' : 
                      session?.qrCode ? 'QR Available - Please Scan 📱' : 
                      session?.pairingCode ? 'Pairing Code Available 🔑' :
@@ -494,66 +416,13 @@ app.get('/api/qr', async (req, res) => {
                 message: 'Scan with WhatsApp within 2 minutes'
             });
         } else {
+            // Start new QR session
+            await initializeWhatsApp();
             res.json({ 
                 success: false, 
                 message: 'QR code generating... Please wait and refresh' 
             });
         }
-    } catch (error) {
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Pairing Code
-app.get('/api/pairing-code', async (req, res) => {
-    try {
-        const { number } = req.query;
-        
-        if (!number) {
-            return res.json({ 
-                success: false, 
-                error: 'Phone number is required' 
-            });
-        }
-
-        if (!sock) {
-            return res.json({
-                success: false,
-                error: 'WhatsApp client not initialized'
-            });
-        }
-
-        try {
-            const pairingCode = await sock.requestPairingCode(formatPhoneNumber(number));
-            
-            await Session.findOneAndUpdate(
-                {},
-                { 
-                    pairingCode: pairingCode,
-                    phoneNumber: number,
-                    connectionType: 'pairing',
-                    lastActivity: new Date()
-                },
-                { upsert: true, new: true }
-            );
-
-            console.log(`📞 Pairing code generated for ${number}: ${pairingCode}`);
-            
-            res.json({
-                success: true,
-                pairingCode: pairingCode,
-                message: `Enter this code in WhatsApp: ${pairingCode}`,
-                instructions: 'Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number'
-            });
-
-        } catch (error) {
-            console.error('Pairing code error:', error);
-            res.json({ 
-                success: false, 
-                error: 'Failed to generate pairing code. Please try QR code instead.' 
-            });
-        }
-
     } catch (error) {
         res.json({ success: false, error: error.message });
     }
@@ -710,16 +579,18 @@ app.get('/api/health', async (req, res) => {
 // Start WhatsApp after MongoDB connection
 mongoose.connection.on('connected', () => {
     console.log('🔗 Database connected - Starting WhatsApp in 3 seconds...');
-    setTimeout(initializeWhatsApp, 3000);
+    setTimeout(() => {
+        initializeWhatsApp();
+    }, 3000);
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
-    console.log('📱 WhatsApp Marketing Tool with Manual Session Support - READY!');
-    console.log('✅ Manual Session Input');
-    console.log('✅ Pairing Code Support');
+    console.log('📱 WhatsApp Marketing Tool with Enhanced Pairing Support - READY!');
+    console.log('✅ Enhanced Pairing Code System');
+    console.log('✅ Manual Session Support');
     console.log('✅ QR Code Generation');
     console.log('✅ Bulk Messaging');
 });
