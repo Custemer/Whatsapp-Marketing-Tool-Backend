@@ -11,7 +11,7 @@
         "@whiskeysockets/baileys": "github:canove/whaileys",
         "qrcode": "latest",
         "cors": "latest",
-        "mongoose": "latest",
+        "mongoose": "^7.5.0",
         "fs-extra": "latest",
         "pino": "latest"
     },
