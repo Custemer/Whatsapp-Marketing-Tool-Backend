@@ -4,7 +4,7 @@
     "description": "WhatsApp Marketing Tool with Manual Session Support",
     "main": "index.js",
     "scripts": {
-        "start": "node server.js"
+        "start": "node index.js"
     },
     "dependencies": {
         "express": "^4.18.2",
