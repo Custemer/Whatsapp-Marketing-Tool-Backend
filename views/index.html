@@ -1428,28 +1428,47 @@ function usePreviewedNumbers() {
                 logMessage('❌ Detection error: ' + error.message, 'error');
             }
         }
+// Global variable to store active numbers
+let activeNumbersCache = [];
 
-                // NEW: Copy active numbers functions
+// NEW: Get active numbers from local storage
+function getActiveNumbersFromStorage() {
+    try {
+        const stored = localStorage.getItem('whatsapp_detection_results');
+        if (stored) {
+            const data = JSON.parse(stored);
+            return {
+                activeNumbers: data.activeNumbers || [],
+                activeNumbersText: (data.activeNumbers || []).join('\n'),
+                totalActive: (data.activeNumbers || []).length,
+                success: true
+            };
+        }
+        return { success: false, activeNumbers: [], activeNumbersText: '', totalActive: 0 };
+    } catch (error) {
+        console.error('Storage read error:', error);
+        return { success: false, activeNumbers: [], activeNumbersText: '', totalActive: 0 };
+    }
+}
+
+// NEW: Updated copy function with local storage
 async function copyActiveNumbers() {
     try {
         showLoading('Getting active numbers...');
         
-        const response = await fetch('/api/detection/active-numbers');
-        const data = await response.json();
+        // Use local storage instead of API
+        const data = getActiveNumbersFromStorage();
         
         if (data.success && data.activeNumbersText) {
-            // Copy to clipboard
             await navigator.clipboard.writeText(data.activeNumbersText);
             
             hideLoading();
             logMessage(`✅ Copied ${data.totalActive} active numbers to clipboard`);
-            
-            // Show success message
             alert(`✅ Successfully copied ${data.totalActive} active WhatsApp numbers to clipboard!`);
         } else {
             hideLoading();
             logMessage('❌ No active numbers found', 'error');
-            alert('❌ No active WhatsApp numbers found in database.');
+            alert('❌ No active WhatsApp numbers found. Please run detection first.');
         }
     } catch (error) {
         hideLoading();
@@ -1464,20 +1483,27 @@ async function downloadActiveNumbers() {
     try {
         showLoading('Preparing download...');
         
-        const response = await fetch('/api/detection/export-active');
-        const blob = await response.blob();
+        const data = getActiveNumbersFromStorage();
         
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'active_whatsapp_numbers.txt';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        
-        hideLoading();
-        logMessage('✅ Active numbers downloaded as TXT file');
+        if (data.success && data.activeNumbersText) {
+            const blob = new Blob([data.activeNumbersText], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'active_whatsapp_numbers.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            hideLoading();
+            logMessage('✅ Active numbers downloaded as TXT file');
+            alert('✅ Active numbers downloaded successfully!');
+        } else {
+            hideLoading();
+            logMessage('❌ No active numbers found', 'error');
+            alert('❌ No active numbers to download. Please run detection first.');
+        }
         
     } catch (error) {
         hideLoading();
@@ -1492,8 +1518,7 @@ async function loadActiveNumbersToMessaging() {
     try {
         showLoading('Loading active numbers...');
         
-        const response = await fetch('/api/detection/active-numbers');
-        const data = await response.json();
+        const data = getActiveNumbersFromStorage();
         
         if (data.success && data.activeNumbersText) {
             // Load numbers to bulk messaging tab
@@ -1537,10 +1562,9 @@ async function copyRecentActiveNumbers(limit) {
     try {
         showLoading(`Getting last ${limit} active numbers...`);
         
-        const response = await fetch('/api/detection/active-numbers');
-        const data = await response.json();
+        const data = getActiveNumbersFromStorage();
         
-        if (data.success && data.activeNumbers) {
+        if (data.success && data.activeNumbers.length > 0) {
             const recentNumbers = data.activeNumbers.slice(0, limit);
             const numbersText = recentNumbers.join('\n');
             
@@ -1562,123 +1586,7 @@ async function copyRecentActiveNumbers(limit) {
     }
 }
 
-// NEW: Update detection results to include copy buttons
-function updateDetectionResultsUI(data) {
-    const resultsDiv = document.getElementById('detectionResults');
-    
-    resultsDiv.innerHTML = `
-        <div class="alert alert-success">
-            <h4>🎉 Detection Complete!</h4>
-            <p><strong>Total Checked:</strong> ${data.total} numbers</p>
-            <p><strong>Active WhatsApp:</strong> ${data.active} numbers</p>
-            <p><strong>Not on WhatsApp:</strong> ${data.inactive} numbers</p>
-            <p><strong>Success Rate:</strong> ${data.activePercentage}%</p>
-            
-            ${data.active > 0 ? `
-                <div style="margin-top: 15px; padding: 15px; background: #d4edda; border-radius: 5px;">
-                    <h5>🚀 Quick Actions for Active Numbers:</h5>
-                    <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">
-                        <button class="btn btn-success" onclick="copyDetectedActiveNumbers(${JSON.stringify(data.activeNumbers).replace(/"/g, '&quot;')})">
-                            <i class="fas fa-copy"></i> Copy ${data.active} Numbers
-                        </button>
-                        <button class="btn btn-info" onclick="useActiveNumbersForMessaging(${JSON.stringify(data.activeNumbers).replace(/"/g, '&quot;')})">
-                            <i class="fas fa-paper-plane"></i> Use for Messaging
-                        </button>
-                        <button class="btn btn-warning" onclick="saveActiveNumbersToCategory(${JSON.stringify(data.activeNumbers).replace(/"/g, '&quot;')})">
-                            <i class="fas fa-save"></i> Save to Category
-                        </button>
-                    </div>
-                </div>
-            ` : ''}
-        </div>
-        <div class="results-container">
-            <h5>Detailed Results:</h5>
-            ${data.results.map(result => `
-                <div class="result-item ${result.status === 'active' ? 'result-success' : 'result-error'}">
-                    <div>
-                        <strong>${result.number}</strong>
-                        ${result.profileName ? ` - ${result.profileName}` : ''}
-                    </div>
-                    <span>
-                        ${result.status === 'active' ? 
-                            '<span style="color: green;">✅ Active</span>' : 
-                            '<span style="color: red;">❌ Not on WhatsApp</span>'
-                        }
-                    </span>
-                </div>
-            `).join('')}
-        </div>
-    `;
-}
-
-// NEW: Copy detected active numbers
-async function copyDetectedActiveNumbers(activeNumbers) {
-    try {
-        const numbersText = activeNumbers.join('\n');
-        await navigator.clipboard.writeText(numbersText);
-        logMessage(`✅ Copied ${activeNumbers.length} detected active numbers to clipboard`);
-        
-        // Show quick confirmation
-        alert(`✅ Copied ${activeNumbers.length} active numbers to clipboard!`);
-    } catch (error) {
-        console.error('Copy detected numbers error:', error);
-        logMessage('❌ Failed to copy numbers: ' + error.message, 'error');
-        alert('❌ Error copying numbers: ' + error.message);
-    }
-}
-
-// NEW: Use active numbers for messaging
-function useActiveNumbersForMessaging(activeNumbers) {
-    const numbersText = activeNumbers.join('\n');
-    document.getElementById('bulkNumbers').value = numbersText;
-    
-    // Switch to bulk messaging tab
-    openTab('bulkMessage');
-    
-    logMessage(`✅ ${activeNumbers.length} active numbers loaded to bulk messaging`);
-    
-    // Show success message
-    alert(`✅ ${activeNumbers.length} active numbers loaded to bulk messaging tab!`);
-}
-
-// NEW: Save active numbers to category
-async function saveActiveNumbersToCategory(activeNumbers) {
-    const categoryName = prompt('Enter category name for these active numbers:', 'Active WhatsApp Contacts');
-    
-    if (categoryName) {
-        try {
-            showLoading('Saving to category...');
-            
-            const response = await fetch('/api/categories', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    name: categoryName,
-                    description: `Category for ${activeNumbers.length} active WhatsApp numbers`,
-                    color: '#25D366'
-                })
-            });
-            
-            const data = await response.json();
-            hideLoading();
-            
-            if (data.success) {
-                logMessage(`✅ Created category "${categoryName}" with ${activeNumbers.length} active numbers`);
-                alert(`✅ Category "${categoryName}" created successfully!`);
-            } else {
-                logMessage('❌ Failed to create category', 'error');
-                alert('❌ Failed to create category.');
-            }
-        } catch (error) {
-            hideLoading();
-            console.error('Save category error:', error);
-            logMessage('❌ Category creation failed: ' + error.message, 'error');
-            alert('❌ Error creating category: ' + error.message);
-        }
-    }
-    
+                
         // Category Management
         async function loadCategories() {
             try {
