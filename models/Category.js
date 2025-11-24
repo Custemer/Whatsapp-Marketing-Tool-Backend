@@ -23,7 +23,15 @@ const categorySchema = new mongoose.Schema({
         }
     },
     contactCount: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
 });
+
+// Update updatedAt before saving
+categorySchema.pre('save', function(next) {
+    this.updatedAt = Date.now();
+    next();
+});
+
 
 module.exports = mongoose.model('Category', categorySchema);
